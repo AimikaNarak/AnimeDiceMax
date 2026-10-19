@@ -1393,9 +1393,8 @@ function MGR.done(text)
             pcall(MGR.fn("Horst_AccountChangeDone"))
         end
     elseif kind == "Masterp" then
-        if MGR.fn("Masterp_Description") then
-            pcall(MGR.fn("Masterp_Description"), text)
-        end
+        -- Status = Done comes only from Masterp_Done; no Description call here, so nothing
+        -- can race or overwrite it (the last farming description stays as it was)
         local f = MGR.fn("Masterp_Done")
         local report
         if f then
