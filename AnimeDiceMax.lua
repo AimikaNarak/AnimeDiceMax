@@ -123,7 +123,7 @@ local S = {
     upgradeTotal = 0,
     tower = { name = "-", floor = 0, predicted = 0, runs = 0, cycle = 0, msg = "off" },
     chain = { role = "-", phase = "farm", target = nil, msg = "off", done = false, myIndex = nil,
-        lastTp = 0, lastHop = 0, lastHostCheck = 0 },
+        lastTp = 0, lastHop = 0, lastHostCheck = 0, builderHere = false, builderName = nil },
     afk = "pending",
     rejoin = "not queued",
     codesDone = false,
@@ -1547,6 +1547,8 @@ function CH.afterDone(text)
         log("DONE but no account manager found - not closing Roblox (a rejoin tool would relaunch it)", "Warn")
         return
     end
+    MGR.status(string.gsub(text, "^DONE", "Success!"), nil)
+    task.wait(2)
     -- keep repeating Done: the manager closes Roblox when it receives it
     while alive() do
         MGR.done(text)
@@ -1747,6 +1749,7 @@ function CH.tick()
         return
     end
     local builderName = order[bi]
+    S.chain.builderName = builderName
 
     if bi == me then
         S.chain.role = "builder"
@@ -1858,6 +1861,7 @@ function CH.tick()
         fire(R.TEnable, true)
     end
     local builderHere = bs.jobId == game.JobId
+    S.chain.builderHere = builderHere
     -- stop rolling once the builder is here so storage stays free for the units
     S.pauseRoll = builderHere
     local _, _, free = H.storage()
@@ -2918,21 +2922,63 @@ function UI.refresh()
     UI.logs:Set(#lines > 0 and table.concat(lines, "\n") or "-")
 end
 
+-- what this account is doing right now, in one readable line for the account manager:
+--   Build (Dice Genesis → Skeleton)      still building; lists only what Chain.MaxedWhen needs
+--   Waiting for Trade → <next>           maxed, waiting for the next account to arrive / trade
+--   Trading with <name>                   trade window is open
+--   Success! sent to <next>               finished (sent once by CH.afterDone, then Done)
+--   Queue #4 · builder <name>             waiting for its turn
+--   Joining <name> / Waiting for Trade ← <name>   it is our turn to receive
+--   Farming                               not in Chain.Order (or chain off)
+function UI.activity()
+    local ch = S.chain
+    if not S.chainOn or not ch.myIndex then
+        return "Farming"
+    end
+    if ch.role == "builder" then
+        if ch.phase == "send" then
+            if T.active then
+                return "Trading with " .. tostring(ch.target)
+            end
+            return "Waiting for Trade → " .. tostring(ch.target)
+        end
+        local need = H.set(CFG.Chain.MaxedWhen)
+        local parts = {}
+        if need.Dice then
+            table.insert(parts, "Dice " .. tostring(D.Dice()) .. " → " .. tostring(S.topDice))
+        end
+        if need.Rebirth then
+            table.insert(parts, "Rebirth " .. D.Rebirth() .. "/" .. S.rebirthTarget)
+        end
+        if need.Upgrades then
+            table.insert(parts, "Upgrades " .. H.upgradesOwned() .. "/" .. S.upgradeTotal)
+        end
+        return "Build (" .. table.concat(parts, ", ") .. ")"
+    end
+    if ch.phase == "host" then
+        if T.active then
+            return "Trading with " .. tostring(ch.target)
+        end
+        if ch.builderHere then
+            return "Waiting for Trade ← " .. tostring(ch.target)
+        end
+        return "Joining " .. tostring(ch.target)
+    end
+    return "Queue #" .. tostring(ch.myIndex) .. " · builder " .. tostring(ch.builderName or "?")
+end
+
 function UI.manager()
     if S.chain.done then
         return
     end
-    local phase = S.chainOn and S.chain.phase or "farm"
-    local desc = string.format("R%d/%d %s Upg %d/%d $%s %s",
-        D.Rebirth(), S.rebirthTarget, tostring(D.Dice()), H.upgradesOwned(), S.upgradeTotal,
-        H.fmt(D.Money()), phase)
+    local desc = UI.activity()
     MGR.status(desc, {
         __order = { "Rebirth", "Dice", "Upgrades", "Money", "Phase" },
         Rebirth = D.Rebirth() .. "/" .. S.rebirthTarget,
         Dice = tostring(D.Dice()),
         Upgrades = H.upgradesOwned() .. "/" .. S.upgradeTotal,
         Money = H.fmt(D.Money()),
-        Phase = phase,
+        Phase = desc,
     })
 end
 
