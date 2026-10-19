@@ -10,7 +10,7 @@ getgenv().AnimeDice = {
         Start      = true,   -- เริ่มทันทีตอนโหลด (false = รอกดเปิดในหน้า Controls)
         Graphics   = 1,      -- 0 = ภาพปกติ · 1 = ภาพต่ำ ปิดเอฟเฟกต์ · 2 = แบบ 1 + ปิดภาพ 3D และล็อก 20 FPS (เปิดหลายจอ)
         LevelUnits = true,   -- อัพเลเวลตัวที่วางบ้าน เฉพาะครั้งที่เงินคืนทุนใน 10 นาที
-        AutoItems  = true,   -- ใช้ยา (Luck/Income/Damage ฯลฯ) ตอนหมดฤทธิ์ + ใช้ Lucky Spin (ไม่แตะ Jackpot Spin)
+        AutoItems  = true,   -- กินยาทุกขวด ทุกขั้น ทุกสาย (Income/Luck/Damage · Slayer · Shadow ฯลฯ) + ใช้ Lucky Spin (ไม่แตะ Jackpot Spin)
     },
 
     -- ▸ ขายตัวล้นกระเป๋า (ตัวที่วางบ้าน · ตัวในทีม tower · ตัวที่ล็อก · ตัวใน Chain.Units ไม่โดนขาย)

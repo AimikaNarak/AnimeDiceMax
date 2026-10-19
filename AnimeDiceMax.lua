@@ -1133,39 +1133,47 @@ function SYS.rewards()
 end
 
 -- ── potions + Lucky Spin ────────────────────────────────────
--- The server runs only the highest tier per category, so a potion is used only when its
--- category has nothing active or queued.
+-- Every potion of every tier and every family (Income, Slayer, Shadow, Pirate, ...) is drunk.
+-- BoostService runs only the highest tier of each category; the rest wait with their
+-- remaining time frozen (no startedAt) and start the moment the one above expires, so drinking
+-- everything at once loses no time, leaves no gap between bottles, and a stronger bottle from a
+-- tower drop takes over immediately. Different categories stack (multipliers multiply).
 function SYS.items()
     local inv = D.Inventory() or {}
-    local active = {}
     local spinActive = false
     for _, a in pairs(D.ActiveEntries() or {}) do
         local cfg = M.Entry.getEntryConfig(a.name)
-        if cfg and cfg.kind == "Boost" then
-            active[cfg.category] = true
-        elseif cfg and cfg.kind == "Spin" then
+        if cfg and cfg.kind == "Spin" then
             spinActive = true
         end
     end
-    local best = {}
+    local queue = {}
     local spinKey = nil
     for key, e in pairs(inv) do
         local cfg = M.Entry.getEntryConfig(e.name)
         if cfg and (e.amount or 0) > 0 then
-            if cfg.kind == "Boost" and cfg.category and not active[cfg.category] then
-                local b = best[cfg.category]
-                if not b or (cfg.tier or 0) > b.tier then
-                    best[cfg.category] = { key = key, tier = cfg.tier or 0 }
-                end
+            if cfg.kind == "Boost" then
+                table.insert(queue, { key = key, amount = e.amount, tier = cfg.tier or 0 })
             elseif cfg.kind == "Spin" and e.name ~= "Jackpot Spin" then
                 spinKey = key
             end
         end
     end
-    for category, b in pairs(best) do
-        fire(R.Boost, b.key)
-        log("potion " .. b.key .. " (" .. category .. ")")
-        task.wait(0.3)
+    -- strongest first, so the right bottle is the one running while the rest are queued
+    table.sort(queue, function(x, y)
+        return x.tier > y.tier
+    end)
+    local used = 0
+    for _, q in ipairs(queue) do
+        for _ = 1, q.amount do
+            if used >= 40 then
+                break -- the rest go on the next tick (15s)
+            end
+            fire(R.Boost, q.key)
+            used = used + 1
+            task.wait(0.25)
+        end
+        log("potion " .. q.key .. " x" .. q.amount)
     end
     if spinKey and not spinActive then
         fire(R.Spin, spinKey)
