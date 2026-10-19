@@ -1317,15 +1317,29 @@ end
 -- ════════════════════════════════════════════════════════════
 local MGR = { storm = nil, stormTried = false, lastName = "?" }
 
+function MGR.fn(name)
+    local f = rawget(_G, name)
+    if type(f) ~= "function" and getgenv then
+        f = rawget(getgenv(), name)
+    end
+    if type(f) ~= "function" and type(shared) == "table" then
+        f = rawget(shared, name)
+    end
+    if type(f) == "function" then
+        return f
+    end
+    return nil
+end
+
 function MGR.kind()
     local want = string.lower(tostring(CFG.Manager or "Auto"))
     if want == "none" then
         return nil
     end
-    if want == "horst" or (want == "auto" and _G.Horst_SetDescription) then
+    if want == "horst" or (want == "auto" and MGR.fn("Horst_SetDescription")) then
         return "Horst"
     end
-    if want == "masterp" or (want == "auto" and _G.Masterp_Description) then
+    if want == "masterp" or (want == "auto" and MGR.fn("Masterp_Description")) then
         return "Masterp"
     end
     if want == "storm" then
@@ -1356,10 +1370,10 @@ function MGR.status(text, payload)
         MGR.lastName = tostring(kind)
         log("account manager: " .. tostring(kind or "none"))
     end
-    if kind == "Horst" and _G.Horst_SetDescription then
-        pcall(_G.Horst_SetDescription, (string.gsub(text, "[|;]", ",")))
-    elseif kind == "Masterp" and _G.Masterp_Description then
-        pcall(_G.Masterp_Description, text, payload)
+    if kind == "Horst" and MGR.fn("Horst_SetDescription") then
+        pcall(MGR.fn("Horst_SetDescription"), (string.gsub(text, "[|;]", ",")))
+    elseif kind == "Masterp" and MGR.fn("Masterp_Description") then
+        pcall(MGR.fn("Masterp_Description"), text, payload)
     elseif kind == "Storm" then
         local acc = MGR.stormAcc()
         if acc then
@@ -1372,18 +1386,18 @@ end
 function MGR.done(text)
     local kind = MGR.kind()
     if kind == "Horst" then
-        if _G.Horst_SetDescription then
-            pcall(_G.Horst_SetDescription, (string.gsub(text, "[|;]", ",")))
+        if MGR.fn("Horst_SetDescription") then
+            pcall(MGR.fn("Horst_SetDescription"), (string.gsub(text, "[|;]", ",")))
         end
-        if _G.Horst_AccountChangeDone then
-            pcall(_G.Horst_AccountChangeDone)
+        if MGR.fn("Horst_AccountChangeDone") then
+            pcall(MGR.fn("Horst_AccountChangeDone"))
         end
     elseif kind == "Masterp" then
-        if _G.Masterp_Description then
-            pcall(_G.Masterp_Description, text)
+        if MGR.fn("Masterp_Description") then
+            pcall(MGR.fn("Masterp_Description"), text)
         end
-        if _G.Masterp_Done then
-            pcall(_G.Masterp_Done)
+        if MGR.fn("Masterp_Done") then
+            pcall(MGR.fn("Masterp_Done"))
         end
         return true
     elseif kind == "Storm" then
@@ -2796,8 +2810,11 @@ do
         Size = UDim2.fromOffset(540, 400),
         ToggleKey = Enum.KeyCode.RightControl,
         OnClose = function()
-            LP:SetAttribute("AnimeDiceRun", nil)
-            log("stopped (window closed)")
+            -- a newer run replacing this window must keep running: only clear our own token
+            if LP:GetAttribute("AnimeDiceRun") == TOKEN then
+                LP:SetAttribute("AnimeDiceRun", nil)
+                log("stopped (window closed)")
+            end
         end,
     })
     local main = UI.win:Tab("Status")
