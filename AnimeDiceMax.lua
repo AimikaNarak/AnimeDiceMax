@@ -1515,18 +1515,42 @@ function CH.isDone(name)
     return st ~= nil and st.phase == "done"
 end
 
+-- after DONE: stop farming, report Done to the manager until it closes us
+function CH.afterDone(text)
+    S.farm = false
+    S.towerOn = false
+    local wantNone = string.lower(tostring(CFG.Manager)) == "none"
+    if wantNone then
+        if CFG.Chain.LeaveWhenDone then
+            task.wait(5)
+            H.leave("chain done")
+        end
+        return
+    end
+    -- the manager's client may still be loading: wait for it (up to 90s)
+    local t0 = os.clock()
+    while alive() and not MGR.kind() and os.clock() - t0 < 90 do
+        task.wait(3)
+    end
+    if not MGR.kind() then
+        S.chain.msg = S.chain.msg .. " · manager not found, idling (close this window yourself)"
+        log("DONE but no account manager found - not closing Roblox (a rejoin tool would relaunch it)", "Warn")
+        return
+    end
+    -- keep repeating Done: the manager closes Roblox when it receives it
+    while alive() do
+        MGR.done(text)
+        task.wait(30)
+    end
+end
+
 function CH.finish(why)
     S.chain.done = true
     S.chain.phase = "done"
     S.chain.msg = "DONE · " .. why
     CH.write()
     log("chain done: " .. why, "Good")
-    local closesItself = MGR.done("DONE " .. why)
-    if CFG.Chain.LeaveWhenDone then
-        -- give a manager that closes Roblox by itself time to record "done" first
-        task.wait(closesItself and 20 or 5)
-        H.leave("chain done")
-    end
+    CH.afterDone("DONE " .. why)
 end
 
 -- what the builder hands over: chain units (+ equipped gear)
@@ -1870,11 +1894,7 @@ function CH.loop()
         S.chain.phase = "done"
         S.chain.msg = "already DONE (delete " .. chainFile(LP.Name) .. " to rebuild)"
         log(S.chain.msg, "Good")
-        local closesItself = MGR.done("DONE (already)")
-        if CFG.Chain.LeaveWhenDone then
-            task.wait(closesItself and 20 or 5)
-            H.leave("chain already done")
-        end
+        CH.afterDone("DONE (already)")
         return
     end
     -- lock named chain units so nothing can sell them by accident
