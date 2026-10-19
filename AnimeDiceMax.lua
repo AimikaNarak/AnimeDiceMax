@@ -1745,15 +1745,22 @@ function CH.tick()
             return
         end
         if st.jobId ~= game.JobId then
-            local free = (st.maxPlayers or 0) - (st.players or 0)
-            if st.public and free >= CFG.Trade.FreeSlots + 1 then
-                if os.time() - S.chain.lastTp > 30 then
-                    S.chain.msg = "joining " .. targetName .. "'s server"
-                    H.teleport(st.jobId)
+            -- the receiver joins us. We only move when it could never get in:
+            -- a private server (no trading there) or one without a free slot.
+            local slots = Players.MaxPlayers - #Players:GetPlayers()
+            local public = game.PrivateServerId == ""
+            if (not public or slots < CFG.Trade.FreeSlots + 1) and CFG.Trade.HostHop
+                and os.time() - S.chain.lastHop > K.HOP_COOLDOWN then
+                S.chain.lastHop = os.time()
+                local id = H.findServer(CFG.Trade.FreeSlots + 2)
+                if id then
+                    S.chain.msg = "server " .. (public and "full" or "private") .. " · hopping so " .. targetName .. " can join"
+                    H.teleport(id)
+                    return
                 end
-            else
-                S.chain.msg = "waiting: " .. targetName .. "'s server " .. (st.public and ("has " .. free .. " free") or "is private")
             end
+            S.chain.msg = "maxed · waiting for " .. targetName .. " to join this server"
+                .. (public and (" (" .. slots .. " free)") or " (PRIVATE server - can't trade here)")
             return
         end
         local myWait = CFG.Trade.WaitAfterJoin - (os.time() - S.joinedAt)
@@ -1824,19 +1831,17 @@ function CH.tick()
         SYS.sell(true)
     end
     if not builderHere then
-        local slots = Players.MaxPlayers - #Players:GetPlayers()
-        local public = game.PrivateServerId == ""
-        if (not public or slots < CFG.Trade.FreeSlots + 1) and CFG.Trade.HostHop
-            and os.time() - S.chain.lastHop > K.HOP_COOLDOWN then
-            S.chain.lastHop = os.time()
-            local id = H.findServer(CFG.Trade.FreeSlots + 2)
-            if id then
-                S.chain.msg = "hopping to a roomier public server"
-                H.teleport(id)
-                return
+        local open = (bs.maxPlayers or 0) - (bs.players or 0)
+        if bs.public and open >= 1 then
+            if os.time() - S.chain.lastTp > 30 then
+                S.chain.msg = "joining " .. builderName .. "'s server"
+                H.teleport(bs.jobId)
+            else
+                S.chain.msg = "joining " .. builderName .. "'s server (retry in " .. (30 - (os.time() - S.chain.lastTp)) .. "s)"
             end
+        else
+            S.chain.msg = "waiting: " .. builderName .. "'s server " .. (bs.public and "is full" or "is private")
         end
-        S.chain.msg = "hosting · waiting for " .. builderName .. " to join"
         return
     end
     S.chain.msg = "hosting · " .. builderName .. " is here" .. (T.active and (" · trade " .. tostring(T.phase)) or "")
