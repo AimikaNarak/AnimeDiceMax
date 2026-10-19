@@ -125,6 +125,7 @@ local S = {
     chain = { role = "-", phase = "farm", target = nil, msg = "off", done = false, myIndex = nil,
         lastTp = 0, lastHop = 0, lastHostCheck = 0 },
     afk = "pending",
+    rejoin = "not queued",
     codesDone = false,
 }
 
@@ -427,19 +428,25 @@ function H.serialize(v)
     return "nil"
 end
 
+-- Queued once at startup, so ANY teleport re-runs the script: ours, the game's AFK rejoin
+-- (StarterPlayerScripts.AFK) or a kick-to-new-server. Each new run queues itself again.
+-- A full relaunch by Masterp/Horst starts a new Roblox process, which only autoexec covers.
 function H.queueReexec()
-    local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
-    if not q then
-        return false
+    local q = queueonteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+    if type(q) ~= "function" then
+        return false, "executor has no queueonteleport"
     end
-    -- re-run from GitHub after the teleport (same copy the loader uses)
-    local src = "getgenv().AnimeDice=" .. H.serialize(CFG) .. "\nloadstring(game:HttpGet(\"" .. K.MAIN_URL .. "\"))()"
-    pcall(q, src)
+    local src = "repeat task.wait() until game:IsLoaded()\n"
+        .. "getgenv().AnimeDice=" .. H.serialize(CFG) .. "\n"
+        .. "loadstring(game:HttpGet(\"" .. K.MAIN_URL .. "\"))()"
+    local ok, err = pcall(q, src)
+    if not ok then
+        return false, tostring(err)
+    end
     return true
 end
 
 function H.teleport(jobId)
-    H.queueReexec()
     S.chain.lastTp = os.time()
     if jobId then
         log("teleport -> server " .. string.sub(jobId, 1, 8))
@@ -2849,7 +2856,7 @@ function UI.refresh()
 
     local ch = S.chain
     UI.chain:Set((S.chainOn and (ch.role .. " · " .. ch.phase) or "off") .. "\n" .. tostring(ch.msg)
-        .. "\nAFK guard: " .. S.afk, ch.done and "Good" or (ch.phase == "send" or ch.phase == "host") and "Accent" or "Text")
+        .. "\nAFK guard: " .. S.afk .. " · rejoin: " .. S.rejoin, ch.done and "Good" or (ch.phase == "send" or ch.phase == "host") and "Accent" or "Text")
     UI.chain:SetActive(S.chainOn and (ch.phase == "send" or ch.phase == "host"))
 
     local lines = {}
@@ -2884,6 +2891,11 @@ log(string.format("loaded · %s · rebirth %d/%d · top dice %s · %d upgrades �
     LP.Name, D.Rebirth(), S.rebirthTarget, tostring(S.topDice), S.upgradeTotal, game.PlaceId))
 if game.PrivateServerId ~= "" then
     log("private server: trading is disabled here by the game", "Warn")
+end
+do
+    local ok, err = H.queueReexec()
+    S.rejoin = ok and "auto re-run queued" or ("NOT queued: " .. tostring(err) .. " - put Loader.lua in autoexec")
+    log("teleport re-run: " .. S.rejoin, ok and "Good" or "Bad")
 end
 SYS.graphics(CFG.Farm.Graphics)
 task.spawn(SYS.antiAfk)
