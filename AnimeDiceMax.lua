@@ -1315,7 +1315,7 @@ end
 --   Storm   StormAccount.lua over localhost:3030 · acc:SetDescription · acc:MarkFinished
 -- The manager's own loader may finish after us, so "Auto" re-detects on every call.
 -- ════════════════════════════════════════════════════════════
-local MGR = { storm = nil, stormTried = false, lastName = "?" }
+local MGR = { storm = nil, stormTried = false, lastName = "?", lastDone = nil }
 
 function MGR.fn(name)
     local f = rawget(_G, name)
@@ -1396,8 +1396,19 @@ function MGR.done(text)
         if MGR.fn("Masterp_Description") then
             pcall(MGR.fn("Masterp_Description"), text)
         end
-        if MGR.fn("Masterp_Done") then
-            pcall(MGR.fn("Masterp_Done"))
+        local f = MGR.fn("Masterp_Done")
+        local report
+        if f then
+            local where = rawget(_G, "Masterp_Done") and "_G"
+                or (getgenv and rawget(getgenv(), "Masterp_Done") and "getgenv") or "shared"
+            local ok, res = pcall(f)
+            report = "Masterp_Done (" .. where .. ") -> " .. (ok and ("ok, returned " .. tostring(res)) or ("ERROR " .. tostring(res)))
+        else
+            report = "Masterp_Done NOT FOUND (Description works, Done is missing)"
+        end
+        if report ~= MGR.lastDone then
+            MGR.lastDone = report
+            log(report, "Warn")
         end
         return true
     elseif kind == "Storm" then
