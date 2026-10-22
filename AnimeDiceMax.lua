@@ -123,7 +123,7 @@ local S = {
     upgradeTotal = 0,
     tower = { name = "-", floor = 0, predicted = 0, runs = 0, cycle = 0, msg = "off" },
     chain = { role = "-", phase = "farm", target = nil, msg = "off", done = false, myIndex = nil,
-        lastTp = 0, lastHop = 0, lastHostCheck = 0, builderHere = false, builderName = nil },
+        lastTp = 0, lastHop = 0, lastHostCheck = 0, builderHere = false, builderName = nil, builderIdx = nil },
     afk = "pending",
     rejoin = "not queued",
     codesDone = false,
@@ -1750,6 +1750,7 @@ function CH.tick()
     end
     local builderName = order[bi]
     S.chain.builderName = builderName
+    S.chain.builderIdx = bi
 
     if bi == me then
         S.chain.role = "builder"
@@ -1954,53 +1955,51 @@ function CH.loop()
 end
 
 -- ════════════════════════════════════════════════════════════
--- UI (UIFX kit, inlined)
+-- UI · Chain Status card
+-- One card that answers "what is this account doing right now": a pulsing phase orb with a
+-- big title (the colour IS the phase), goal progress, where we sit in the chain, live stats,
+-- the tower and the latest log line. Every write happens on our own Heartbeat, never inside a
+-- game callback (Potassium rejects GUI writes from game threads).
 -- ════════════════════════════════════════════════════════════
-local UIFX = (function()
--- UIFX: dark-minimal UI kit for executor scripts (plain untyped Luau)
--- Usage (inline, single-file scripts):
---   local UIFX = (function() <paste this file> end)()
--- Usage (local file in executor workspace):
---   local UIFX = loadstring(readfile("UIFX.lua"))()
+local UI = { gui = nil, conns = {}, el = {}, phase = nil, lastLog = nil, visible = true,
+    minimized = false, refreshAt = 0, nodes = {}, ladder = nil, chips = {} }
 
-local UIFX = {}
-
-local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
-
--- Design tokens. Change colors here, never inline in elements.
-UIFX.Theme = {
-    Bg = Color3.fromRGB(16, 16, 20),
-    Panel = Color3.fromRGB(23, 23, 29),
-    Elevated = Color3.fromRGB(31, 31, 39),
-    Stroke = Color3.fromRGB(46, 46, 56),
-    Text = Color3.fromRGB(236, 236, 242),
-    SubText = Color3.fromRGB(148, 148, 162),
-    Accent = Color3.fromRGB(108, 138, 255),
-    Good = Color3.fromRGB(78, 196, 120),
-    Warn = Color3.fromRGB(238, 178, 68),
+local TH = {
+    Bg = Color3.fromRGB(13, 14, 19),
+    Panel = Color3.fromRGB(20, 22, 29),
+    Elevated = Color3.fromRGB(29, 31, 41),
+    Stroke = Color3.fromRGB(44, 47, 60),
+    Text = Color3.fromRGB(236, 238, 245),
+    Sub = Color3.fromRGB(140, 145, 162),
+    Dim = Color3.fromRGB(84, 88, 104),
+    Good = Color3.fromRGB(74, 210, 128),
     Bad = Color3.fromRGB(232, 82, 92),
     Font = Enum.Font.GothamMedium,
-    FontBold = Enum.Font.GothamBold,
-    Radius = 8,
+    Bold = Enum.Font.GothamBold,
+    Mono = Enum.Font.Code,
 }
 
--- Motion tokens. Fast = hover/press, Base = state change, Slow = open/close.
-UIFX.Motion = {
+-- one colour per phase; pulse = orb rings per second
+local PHASES = {
+    BUILD = { title = "BUILDING", color = Color3.fromRGB(108, 138, 255), sweep = 70, pulse = 0.6 },
+    WAIT = { title = "WAITING FOR TRADE", color = Color3.fromRGB(240, 180, 64), sweep = 140, pulse = 1.1 },
+    JOIN = { title = "JOINING SERVER", color = Color3.fromRGB(64, 200, 230), sweep = 180, pulse = 1.3 },
+    TRADE = { title = "TRADING", color = Color3.fromRGB(190, 110, 255), sweep = 300, pulse = 1.8 },
+    SUCCESS = { title = "SUCCESS", color = Color3.fromRGB(74, 210, 128), sweep = 40, pulse = 0.4 },
+    QUEUE = { title = "IN QUEUE", color = Color3.fromRGB(130, 136, 156), sweep = 30, pulse = 0.35 },
+    FARM = { title = "FARMING", color = Color3.fromRGB(108, 138, 255), sweep = 50, pulse = 0.5 },
+    PAUSED = { title = "PAUSED", color = Color3.fromRGB(232, 82, 92), sweep = 20, pulse = 0.25 },
+}
+
+local TweenService = game:GetService("TweenService")
+local MOTION = {
     Fast = TweenInfo.new(0.12, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-    Base = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-    Slow = TweenInfo.new(0.38, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-    Spring = TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+    Base = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+    Slow = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+    Spring = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
 }
 
-local Theme = UIFX.Theme
-local Motion = UIFX.Motion
-
--- ── primitives ──────────────────────────────────────────────
-
-local function new(class, props, children)
+function UI.new(class, props, children)
     local inst = Instance.new(class)
     local parent = nil
     for k, v in pairs(props or {}) do
@@ -2010,917 +2009,763 @@ local function new(class, props, children)
             inst[k] = v
         end
     end
-    for _, child in ipairs(children or {}) do
-        child.Parent = inst
+    for _, c in ipairs(children or {}) do
+        c.Parent = inst
     end
     if parent then
         inst.Parent = parent
     end
     return inst
 end
-UIFX.new = new
 
-local function tween(inst, info, goal)
+function UI.tween(inst, info, goal)
     local t = TweenService:Create(inst, info, goal)
     t:Play()
     return t
 end
-UIFX.tween = tween
 
-local function corner(radius)
-    return new("UICorner", { CornerRadius = UDim.new(0, radius or Theme.Radius) })
+function UI.corner(r)
+    return UI.new("UICorner", { CornerRadius = r and UDim.new(0, r) or UDim.new(1, 0) })
 end
 
-local function stroke(color, transparency)
-    return new("UIStroke", {
-        Color = color or Theme.Stroke,
-        Transparency = transparency or 0,
-        Thickness = 1,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-    })
-end
-
-local function padding(px)
-    return new("UIPadding", {
-        PaddingTop = UDim.new(0, px),
-        PaddingBottom = UDim.new(0, px),
-        PaddingLeft = UDim.new(0, px),
-        PaddingRight = UDim.new(0, px),
-    })
-end
-
-local function label(text, size, color, font)
-    return new("TextLabel", {
+function UI.label(text, size, color, font, props)
+    local l = UI.new("TextLabel", {
         BackgroundTransparency = 1,
         Text = text,
-        TextSize = size or 13,
-        TextColor3 = color or Theme.Text,
-        Font = font or Theme.Font,
+        TextSize = size,
+        TextColor3 = color,
+        Font = font or TH.Font,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Center,
-        Size = UDim2.new(1, 0, 1, 0),
+        TextTruncate = Enum.TextTruncate.AtEnd,
     })
-end
-
-local function isPointer(input)
-    return input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch
-end
-
-local function isMove(input)
-    return input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch
-end
-
--- Hidden parent first: gethui() is unreachable from game scripts.
-local function guiParent()
-    if type(gethui) == "function" then
-        local ok, hui = pcall(gethui)
-        if ok and hui then
-            return hui
-        end
+    for k, v in pairs(props or {}) do
+        l[k] = v
     end
-    local ok, core = pcall(function()
+    return l
+end
+
+function UI.track(conn)
+    table.insert(UI.conns, conn)
+    return conn
+end
+
+function UI.parent()
+    local ok, h = pcall(function()
+        return gethui and gethui()
+    end)
+    if ok and h then
+        return h
+    end
+    local okCore, core = pcall(function()
         return game:GetService("CoreGui")
     end)
-    if ok and core then
-        return core
+    if okCore and core then
+        local okTest = pcall(function()
+            return core.Name
+        end)
+        if okTest then
+            return core
+        end
     end
-    return Players.LocalPlayer:WaitForChild("PlayerGui")
+    return LP:WaitForChild("PlayerGui")
 end
 
--- Ink ripple from the pointer position. Button needs ClipsDescendants = true.
-local function ripple(button)
-    local mouse = UserInputService:GetMouseLocation()
-    local abs = button.AbsolutePosition
-    local size = math.max(button.AbsoluteSize.X, button.AbsoluteSize.Y) * 2.2
-    local dot = new("Frame", {
-        BackgroundColor3 = Theme.Text,
-        BackgroundTransparency = 0.86,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromOffset(mouse.X - abs.X, mouse.Y - abs.Y),
-        Size = UDim2.fromOffset(0, 0),
-        ZIndex = button.ZIndex + 1,
-        Parent = button,
-    }, { corner(9999) })
-    tween(dot, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-        Size = UDim2.fromOffset(size, size),
+-- ── which phase are we in (same rules as the account-manager description) ──
+function UI.phaseKey()
+    local ch = S.chain
+    if ch.done then
+        return "SUCCESS"
+    end
+    if not S.farm then
+        return "PAUSED"
+    end
+    if not S.chainOn or not ch.myIndex then
+        return "FARM"
+    end
+    if T.active then
+        return "TRADE"
+    end
+    if ch.role == "builder" then
+        return ch.phase == "send" and "WAIT" or "BUILD"
+    end
+    if ch.phase == "host" then
+        return ch.builderHere and "WAIT" or "JOIN"
+    end
+    return "QUEUE"
+end
+
+-- dice owned by price order, so "Genesis → Skeleton" can become a fraction
+function UI.diceFrac()
+    if not UI.ladder then
+        local list = {}
+        for name, d in pairs(M.Dice.GetAll()) do
+            table.insert(list, { name = name, price = d.price or 0 })
+        end
+        table.sort(list, function(a, b)
+            return a.price < b.price
+        end)
+        UI.ladder = {}
+        for i, d in ipairs(list) do
+            UI.ladder[d.name] = i
+        end
+        UI.ladderTop = #list
+    end
+    local cur = UI.ladder[D.Dice()] or 1
+    return (cur - 1) / math.max(1, UI.ladderTop - 1)
+end
+
+-- progress fraction + the small text on the right of the bar
+function UI.goal(key)
+    local ch = S.chain
+    if key == "SUCCESS" then
+        return 1, "sent"
+    elseif key == "WAIT" or key == "TRADE" then
+        return 1, "maxed"
+    elseif key == "QUEUE" or key == "JOIN" then
+        local bi = ch.builderIdx or 1
+        local me = ch.myIndex or 1
+        local ahead = math.max(0, me - bi - 1)
+        local frac = me > 1 and math.clamp((bi - 1) / (me - 1), 0, 1) or 1
+        return frac, key == "JOIN" and "your turn" or (ahead == 0 and "next up" or (ahead .. " ahead"))
+    end
+    local need = H.set(CFG.Chain.MaxedWhen)
+    local sum, n = 0, 0
+    if need.Dice then
+        sum = sum + UI.diceFrac()
+        n = n + 1
+    end
+    if need.Rebirth then
+        sum = sum + D.Rebirth() / math.max(1, S.rebirthTarget)
+        n = n + 1
+    end
+    if need.Upgrades then
+        sum = sum + H.upgradesOwned() / math.max(1, S.upgradeTotal)
+        n = n + 1
+    end
+    local f = n > 0 and math.clamp(sum / n, 0, 1) or 0
+    return f, math.floor(f * 100 + 0.5) .. "%"
+end
+
+function UI.toast(text, kind)
+    if not UI.gui then
+        return
+    end
+    local color = kind == "Bad" and TH.Bad or (kind == "Good" and TH.Good or PHASES.BUILD.color)
+    local t = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.new(0.5, 0, 0, -4),
+        Size = UDim2.fromOffset(0, 30),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = TH.Panel,
         BackgroundTransparency = 1,
+        Parent = UI.el.card,
+    }, {
+        UI.corner(),
+        UI.new("UIStroke", { Color = color, Transparency = 1, Thickness = 1 }),
+        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }),
     })
-    task.delay(0.55, function()
-        dot:Destroy()
+    local l = UI.label(text, 12, TH.Text, TH.Bold, {
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        TextTransparency = 1,
+        Parent = t,
+    })
+    local s = t:FindFirstChildOfClass("UIStroke")
+    UI.tween(t, MOTION.Spring, { Position = UDim2.new(0.5, 0, 0, -10), BackgroundTransparency = 0 })
+    UI.tween(s, MOTION.Base, { Transparency = 0.2 })
+    UI.tween(l, MOTION.Base, { TextTransparency = 0 })
+    task.delay(3, function()
+        if t.Parent then
+            UI.tween(t, MOTION.Base, { BackgroundTransparency = 1, Position = UDim2.new(0.5, 0, 0, -2) })
+            UI.tween(s, MOTION.Base, { Transparency = 1 })
+            UI.tween(l, MOTION.Base, { TextTransparency = 1 })
+            task.wait(0.3)
+            t:Destroy()
+        end
     end)
 end
-UIFX.ripple = ripple
 
--- ── window ──────────────────────────────────────────────────
-
-function UIFX.Window(opts)
-    opts = opts or {}
-    local title = opts.Title or "Script"
-    local size = opts.Size or UDim2.fromOffset(520, 340)
-    local toggleKey = opts.ToggleKey or Enum.KeyCode.RightControl
-    local guiName = "UIFX_" .. title
-
-    local win = { Alive = true, Tabs = {} }
-    local conns = {}
-    local statuses = {}
-
-    local function track(conn)
-        table.insert(conns, conn)
-        return conn
+-- confetti-like burst out of the orb (SUCCESS)
+function UI.burst(color)
+    local orb = UI.el.orb
+    if not orb then
+        return
     end
-    win.track = track
+    for i = 1, 16 do
+        local angle = (i / 16) * math.pi * 2 + math.random() * 0.4
+        local dist = 34 + math.random() * 26
+        local p = UI.new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(5, 5),
+            BackgroundColor3 = (i % 3 == 0) and TH.Text or color,
+            ZIndex = 5,
+            Parent = orb,
+        }, { UI.corner() })
+        UI.tween(p, TweenInfo.new(0.7, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            Position = UDim2.new(0.5, math.cos(angle) * dist, 0.5, math.sin(angle) * dist),
+            BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(2, 2),
+        })
+        task.delay(0.75, function()
+            p:Destroy()
+        end)
+    end
+end
 
-    -- Single instance: a re-run removes the old window; the old copy's
-    -- watchdog sees its gui lose its Parent and shuts itself down.
-    local parent = guiParent()
-    local old = parent:FindFirstChild(guiName)
+function UI.chip(parent, text, getOn, onClick, order)
+    local b = UI.new("TextButton", {
+        AutoButtonColor = false,
+        Text = text,
+        TextSize = 12,
+        Font = TH.Bold,
+        TextColor3 = TH.Sub,
+        BackgroundColor3 = TH.Elevated,
+        Size = UDim2.fromOffset(0, 26),
+        AutomaticSize = Enum.AutomaticSize.X,
+        LayoutOrder = order,
+        Parent = parent,
+    }, {
+        UI.corner(),
+        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }),
+        UI.new("UIStroke", { Color = TH.Stroke, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
+        UI.new("UIScale", {}),
+    })
+    local sc = b:FindFirstChildOfClass("UIScale")
+    UI.track(b.MouseButton1Down:Connect(function()
+        UI.tween(sc, MOTION.Fast, { Scale = 0.94 })
+    end))
+    UI.track(b.MouseButton1Up:Connect(function()
+        UI.tween(sc, MOTION.Spring, { Scale = 1 })
+    end))
+    UI.track(b.MouseLeave:Connect(function()
+        UI.tween(sc, MOTION.Spring, { Scale = 1 })
+    end))
+    UI.track(b.Activated:Connect(function()
+        task.spawn(function()
+            local ok, err = pcall(onClick)
+            if not ok then
+                log("button error: " .. tostring(err), "Bad")
+            end
+        end)
+    end))
+    table.insert(UI.chips, { button = b, getOn = getOn, last = nil })
+    return b
+end
+
+function UI.stat(parent, title, order)
+    local f = UI.new("Frame", {
+        BackgroundColor3 = TH.Panel,
+        Size = UDim2.new(0.25, -5, 0, 50),
+        LayoutOrder = order,
+        Parent = parent,
+    }, { UI.corner(8), UI.new("UIStroke", { Color = TH.Stroke }) })
+    UI.label(string.upper(title), 10, TH.Dim, TH.Bold, {
+        Position = UDim2.fromOffset(10, 7),
+        Size = UDim2.new(1, -16, 0, 12),
+        Parent = f,
+    })
+    return UI.label("-", 15, TH.Text, TH.Bold, {
+        Position = UDim2.fromOffset(10, 22),
+        Size = UDim2.new(1, -16, 0, 20),
+        Parent = f,
+    })
+end
+
+function UI.build()
+    local parent = UI.parent()
+    local old = parent:FindFirstChild("AnimeDiceChainHUD")
     if old then
-        old:Destroy()
+        old:Destroy() -- the old copy's Heartbeat sees its gui gone and stops itself
     end
-
-    local gui = new("ScreenGui", {
-        Name = guiName,
+    local gui = UI.new("ScreenGui", {
+        Name = "AnimeDiceChainHUD",
         ResetOnSpawn = false,
         IgnoreGuiInset = true,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         DisplayOrder = 999,
     })
     gui.Parent = parent
-    win.Gui = gui
+    UI.gui = gui
+    local el = UI.el
 
-    local root = new("CanvasGroup", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = size,
-        BackgroundColor3 = Theme.Bg,
-        GroupTransparency = 1,
+    el.card = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 24, 0.5, 0),
+        Size = UDim2.fromOffset(372, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = TH.Bg,
         Parent = gui,
-    }, { corner(Theme.Radius + 2), stroke(Theme.Stroke) })
-    local scale = new("UIScale", { Scale = 0.94, Parent = root })
-    win.Root = root
+    }, { UI.corner(14), UI.new("UIScale", { Scale = 0.9 }) })
+    el.scale = el.card:FindFirstChildOfClass("UIScale")
+    el.stroke = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Parent = el.card })
+    el.sweep = UI.new("UIGradient", { Parent = el.stroke })
+    UI.new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.card })
 
-    -- top bar
-    local topbar = new("Frame", {
+    -- header (drag handle)
+    local header = UI.new("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 38),
-        Parent = root,
+        Size = UDim2.new(1, 0, 0, 40),
+        LayoutOrder = 1,
+        Parent = el.card,
     })
-    local titleLabel = label(title, 14, Theme.Text, Theme.FontBold)
-    titleLabel.Position = UDim2.fromOffset(14, 0)
-    titleLabel.Size = UDim2.new(1, -100, 1, 0)
-    titleLabel.Parent = topbar
-    new("Frame", {
-        BackgroundColor3 = Theme.Stroke,
-        BorderSizePixel = 0,
-        Position = UDim2.new(0, 0, 1, -1),
-        Size = UDim2.new(1, 0, 0, 1),
-        Parent = topbar,
+    UI.label("ANIME DICE", 13, TH.Text, TH.Bold, {
+        Position = UDim2.fromOffset(16, 0),
+        Size = UDim2.fromOffset(90, 40),
+        Parent = header,
     })
-
-    local function topButton(text, xOffset, hoverColor)
-        local b = new("TextButton", {
+    el.sub = UI.label("· CHAIN", 13, TH.Dim, TH.Bold, {
+        Position = UDim2.fromOffset(100, 0),
+        Size = UDim2.fromOffset(120, 40),
+        Parent = header,
+    })
+    el.badge = UI.new("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -72, 0.5, 0),
+        Size = UDim2.fromOffset(0, 22),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = TH.Elevated,
+        Text = "-",
+        TextSize = 11,
+        Font = TH.Bold,
+        TextColor3 = TH.Sub,
+        Parent = header,
+    }, { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9) }) })
+    local function topButton(text, x, hover, fn)
+        local b = UI.new("TextButton", {
             AutoButtonColor = false,
             AnchorPoint = Vector2.new(1, 0.5),
-            Position = UDim2.new(1, xOffset, 0.5, 0),
+            Position = UDim2.new(1, x, 0.5, 0),
             Size = UDim2.fromOffset(26, 26),
-            BackgroundColor3 = Theme.Elevated,
+            BackgroundColor3 = TH.Elevated,
             BackgroundTransparency = 1,
             Text = text,
             TextSize = 16,
-            TextColor3 = Theme.SubText,
-            Font = Theme.FontBold,
-            Parent = topbar,
-        }, { corner(6) })
-        track(b.MouseEnter:Connect(function()
-            tween(b, Motion.Fast, { BackgroundTransparency = 0, TextColor3 = hoverColor })
+            Font = TH.Bold,
+            TextColor3 = TH.Dim,
+            Parent = header,
+        }, { UI.corner(7) })
+        UI.track(b.MouseEnter:Connect(function()
+            UI.tween(b, MOTION.Fast, { BackgroundTransparency = 0, TextColor3 = hover })
         end))
-        track(b.MouseLeave:Connect(function()
-            tween(b, Motion.Fast, { BackgroundTransparency = 1, TextColor3 = Theme.SubText })
+        UI.track(b.MouseLeave:Connect(function()
+            UI.tween(b, MOTION.Fast, { BackgroundTransparency = 1, TextColor3 = TH.Dim })
         end))
+        UI.track(b.Activated:Connect(fn))
         return b
     end
-    local closeBtn = topButton("×", -8, Theme.Bad)
-    local minBtn = topButton("–", -38, Theme.Text)
-
-    -- smooth drag by the top bar
+    topButton("×", -10, TH.Bad, function()
+        -- only stop the script when the window belongs to the run that is still active
+        if LP:GetAttribute("AnimeDiceRun") == TOKEN then
+            LP:SetAttribute("AnimeDiceRun", nil)
+            log("stopped (window closed)")
+        end
+        UI.destroy()
+    end)
+    topButton("–", -40, TH.Text, function()
+        UI.minimized = not UI.minimized
+        el.body.Visible = not UI.minimized
+    end)
     do
-        local dragging = false
-        local startMouse, startPos
-        track(topbar.InputBegan:Connect(function(input)
-            if isPointer(input) then
+        local dragging, startMouse, startPos = false, nil, nil
+        UI.track(header.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 startMouse = input.Position
-                startPos = root.Position
+                startPos = el.card.Position
             end
         end))
-        track(UserInputService.InputEnded:Connect(function(input)
-            if isPointer(input) then
+        UI.track(UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = false
             end
         end))
-        track(UserInputService.InputChanged:Connect(function(input)
-            if dragging and isMove(input) then
+        UI.track(UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
                 local d = input.Position - startMouse
-                tween(root, Motion.Fast, {
-                    Position = UDim2.new(
-                        startPos.X.Scale, startPos.X.Offset + d.X,
-                        startPos.Y.Scale, startPos.Y.Offset + d.Y
-                    ),
-                })
+                UI.tween(el.card, MOTION.Fast, { Position = UDim2.new(startPos.X.Scale,
+                    startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y) })
             end
         end))
     end
 
-    -- sidebar + pages
-    local sidebar = new("Frame", {
-        BackgroundColor3 = Theme.Panel,
-        BorderSizePixel = 0,
-        Position = UDim2.fromOffset(0, 38),
-        Size = UDim2.new(0, 132, 1, -38),
-        Parent = root,
-    })
-    new("UIListLayout", {
-        Padding = UDim.new(0, 4),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = sidebar,
-    })
-    new("UIPadding", {
-        PaddingTop = UDim.new(0, 8),
-        PaddingLeft = UDim.new(0, 8),
-        PaddingRight = UDim.new(0, 8),
-        Parent = sidebar,
-    })
-    local indicator = new("Frame", {
-        BackgroundColor3 = Theme.Accent,
-        BorderSizePixel = 0,
-        Size = UDim2.fromOffset(3, 18),
-        Position = UDim2.fromOffset(2, 14),
-        Visible = false,
-        Parent = root,
-    }, { corner(2) })
-
-    local pages = new("Frame", {
+    -- phase hero: orb + title + detail (stays visible when minimized)
+    local hero = UI.new("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(132, 38),
-        Size = UDim2.new(1, -132, 1, -38),
-        Parent = root,
+        Size = UDim2.new(1, 0, 0, 70),
+        LayoutOrder = 2,
+        Parent = el.card,
     })
-
-    -- open / close / minimize
-    local visible = false
-    local minimized = false
-
-    function win:Show()
-        visible = true
-        gui.Enabled = true
-        tween(root, Motion.Slow, { GroupTransparency = 0 })
-        tween(scale, Motion.Spring, { Scale = 1 })
-    end
-
-    function win:Hide()
-        visible = false
-        tween(root, Motion.Base, { GroupTransparency = 1 })
-        local t = tween(scale, Motion.Base, { Scale = 0.94 })
-        t.Completed:Connect(function()
-            if not visible and win.Alive then
-                gui.Enabled = false
-            end
-        end)
-    end
-
-    function win:Toggle()
-        if visible then
-            win:Hide()
-        else
-            win:Show()
-        end
-    end
-
-    function win:Destroy()
-        if not win.Alive then
-            return
-        end
-        win.Alive = false
-        for _, c in ipairs(conns) do
-            c:Disconnect()
-        end
-        table.clear(conns)
-        if opts.OnClose then
-            task.spawn(opts.OnClose)
-        end
-        local t = tween(root, Motion.Base, { GroupTransparency = 1 })
-        tween(scale, Motion.Base, { Scale = 0.9 })
-        t.Completed:Connect(function()
-            gui:Destroy()
-        end)
-    end
-
-    track(closeBtn.MouseButton1Click:Connect(function()
-        win:Destroy()
-    end))
-    track(minBtn.MouseButton1Click:Connect(function()
-        minimized = not minimized
-        if minimized then
-            tween(root, Motion.Base, { Size = UDim2.new(size.X.Scale, size.X.Offset, 0, 38) })
-        else
-            tween(root, Motion.Spring, { Size = size })
-        end
-    end))
-    track(UserInputService.InputBegan:Connect(function(input, processed)
-        if not processed and input.KeyCode == toggleKey then
-            win:Toggle()
-        end
-    end))
-
-    -- One thread owns every text write coming from outside (game callbacks
-    -- that touch protected gui can fail with "lacking capability").
-    track(RunService.Heartbeat:Connect(function()
-        if not gui.Parent then
-            win:Destroy()
-            return
-        end
-        for _, s in ipairs(statuses) do
-            if s.dirty then
-                s.dirty = false
-                s.body.Text = s.text
-                s.body.TextColor3 = s.color
-            end
-        end
-    end))
-
-    -- ── notifications ──
-    local toastHolder = new("Frame", {
+    el.orb = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 18, 0.5, -4),
+        Size = UDim2.fromOffset(46, 46),
         BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(1, 1),
-        Position = UDim2.new(1, -16, 1, -16),
-        Size = UDim2.fromOffset(280, 400),
-        Parent = gui,
+        Parent = hero,
     })
-    new("UIListLayout", {
-        Padding = UDim.new(0, 8),
-        VerticalAlignment = Enum.VerticalAlignment.Bottom,
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = toastHolder,
+    el.ring = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Parent = el.orb,
+    }, { UI.corner(), UI.new("UIScale", {}) })
+    el.ringStroke = UI.new("UIStroke", { Thickness = 2, Parent = el.ring })
+    el.ringScale = el.ring:FindFirstChildOfClass("UIScale")
+    el.halo = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(30, 30),
+        BackgroundTransparency = 0.8,
+        Parent = el.orb,
+    }, { UI.corner() })
+    el.core = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(16, 16),
+        Parent = el.orb,
+    }, { UI.corner() })
+    el.title = UI.label("…", 20, TH.Text, TH.Bold, {
+        Position = UDim2.fromOffset(78, 10),
+        Size = UDim2.new(1, -92, 0, 26),
+        Parent = hero,
     })
-    local toastCount = 0
+    el.detail = UI.label("", 12, TH.Sub, TH.Font, {
+        Position = UDim2.fromOffset(78, 36),
+        Size = UDim2.new(1, -92, 0, 16),
+        Parent = hero,
+    })
 
-    function win:Notify(text, kind, duration)
-        duration = duration or 3
-        local color = Theme[kind or "Accent"] or Theme.Accent
-        toastCount = toastCount + 1
-        local slot = new("Frame", {
-            BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 0),
-            LayoutOrder = toastCount,
-            ClipsDescendants = false,
-            Parent = toastHolder,
-        })
-        local card = new("Frame", {
-            BackgroundColor3 = Theme.Panel,
-            Position = UDim2.fromOffset(300, 0),
-            Size = UDim2.new(1, 0, 1, 0),
-            Parent = slot,
-        }, { corner(), stroke(Theme.Stroke) })
-        new("Frame", {
-            BackgroundColor3 = color,
-            BorderSizePixel = 0,
-            Position = UDim2.fromOffset(0, 8),
-            Size = UDim2.new(0, 3, 1, -16),
-            Parent = card,
-        }, { corner(2) })
-        local msg = label(text, 13, Theme.Text)
-        msg.TextWrapped = true
-        msg.Position = UDim2.fromOffset(14, 0)
-        msg.Size = UDim2.new(1, -24, 1, -4)
-        msg.Parent = card
-        local bar = new("Frame", {
-            BackgroundColor3 = color,
-            BackgroundTransparency = 0.4,
-            BorderSizePixel = 0,
-            AnchorPoint = Vector2.new(0, 1),
-            Position = UDim2.new(0, 0, 1, 0),
-            Size = UDim2.new(1, 0, 0, 2),
-            Parent = card,
-        })
-        tween(slot, Motion.Base, { Size = UDim2.new(1, 0, 0, 52) })
-        tween(card, Motion.Spring, { Position = UDim2.fromOffset(0, 0) })
-        tween(bar, TweenInfo.new(duration, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 2) })
-        task.delay(duration, function()
-            local t = tween(card, Motion.Base, { Position = UDim2.fromOffset(300, 0) })
-            t.Completed:Wait()
-            local s = tween(slot, Motion.Base, { Size = UDim2.new(1, 0, 0, 0) })
-            s.Completed:Wait()
-            slot:Destroy()
-        end)
+    -- everything below collapses when minimized
+    el.body = UI.new("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = 3,
+        Parent = el.card,
+    }, {
+        UI.new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }),
+        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 16), PaddingRight = UDim.new(0, 16),
+            PaddingBottom = UDim.new(0, 16) }),
+    })
+    local body = el.body
+
+    -- status message (what the chain logic says right now)
+    el.msg = UI.label("", 11, TH.Dim, TH.Font, {
+        Size = UDim2.new(1, 0, 0, 14),
+        LayoutOrder = 1,
+        Parent = body,
+    })
+
+    -- goal progress with a moving shine
+    local barRow = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 22),
+        LayoutOrder = 2, Parent = body })
+    el.barLabel = UI.label("GOAL", 10, TH.Dim, TH.Bold, { Size = UDim2.new(0.6, 0, 0, 12), Parent = barRow })
+    el.barValue = UI.label("0%", 10, TH.Sub, TH.Bold, { AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.4, 0, 0, 12),
+        TextXAlignment = Enum.TextXAlignment.Right, Parent = barRow })
+    local track = UI.new("Frame", { BackgroundColor3 = TH.Elevated, Position = UDim2.fromOffset(0, 15),
+        Size = UDim2.new(1, 0, 0, 7), ClipsDescendants = true, Parent = barRow }, { UI.corner() })
+    el.fill = UI.new("Frame", { Size = UDim2.fromScale(0, 1), Parent = track }, { UI.corner() })
+    el.shine = UI.new("UIGradient", {
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0),
+            NumberSequenceKeypoint.new(0.45, 0),
+            NumberSequenceKeypoint.new(0.5, 0.65),
+            NumberSequenceKeypoint.new(0.55, 0),
+            NumberSequenceKeypoint.new(1, 0),
+        }),
+        Offset = Vector2.new(-1, 0),
+        Parent = el.fill,
+    })
+    UI.tween(el.shine, TweenInfo.new(1.6, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1),
+        { Offset = Vector2.new(1, 0) })
+
+    -- chain track: 5 nodes around this account
+    local chainRow = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40),
+        LayoutOrder = 3, Parent = body })
+    el.chainRow = chainRow
+    el.line = UI.new("Frame", { BackgroundColor3 = TH.Stroke, BorderSizePixel = 0,
+        Position = UDim2.new(0.1, 0, 0, 7), Size = UDim2.new(0.8, 0, 0, 2), Parent = chainRow })
+    el.lineDone = UI.new("Frame", { BackgroundColor3 = TH.Good, BorderSizePixel = 0,
+        Size = UDim2.fromScale(0, 1), Parent = el.line })
+    for i = 1, 5 do
+        local x = 0.1 + (i - 1) * 0.2
+        local dot = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(x, 0, 0, 1),
+            Size = UDim2.fromOffset(14, 14), BackgroundColor3 = TH.Elevated, Parent = chainRow },
+            { UI.corner(), UI.new("UIStroke", { Color = TH.Stroke, Thickness = 1 }), UI.new("UIScale", {}) })
+        local name = UI.label("", 10, TH.Dim, TH.Font, { AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(x, 0, 0, 20), Size = UDim2.fromOffset(66, 14),
+            TextXAlignment = Enum.TextXAlignment.Center, Parent = chainRow })
+        UI.nodes[i] = { dot = dot, stroke = dot:FindFirstChildOfClass("UIStroke"),
+            scale = dot:FindFirstChildOfClass("UIScale"), name = name }
     end
 
-    -- Run a user callback; surface errors instead of swallowing them.
-    local function run(fn, ...)
-        if not fn then
-            return
+    -- stat tiles
+    local stats = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 50),
+        LayoutOrder = 4, Parent = body },
+        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
+    el.sMoney = UI.stat(stats, "Money", 1)
+    el.sIncome = UI.stat(stats, "Income/s", 2)
+    el.sRolls = UI.stat(stats, "Rolls/min", 3)
+    el.sUnits = UI.stat(stats, "Units", 4)
+
+    -- tower + log
+    local info = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 52),
+        LayoutOrder = 5, Parent = body }, { UI.corner(8), UI.new("UIStroke", { Color = TH.Stroke }) })
+    el.tower = UI.label("", 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(10, 6),
+        Size = UDim2.new(1, -20, 0, 18), Parent = info })
+    el.log = UI.label("", 11, TH.Text, TH.Mono, { Position = UDim2.fromOffset(10, 27),
+        Size = UDim2.new(1, -20, 0, 18), Parent = info })
+
+    -- controls
+    local chips = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26),
+        LayoutOrder = 6, Parent = body },
+        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
+    UI.chip(chips, "Farm", function()
+        return S.farm
+    end, function()
+        S.farm = not S.farm
+        UI.toast(S.farm and "Farm on" or "Farm paused", S.farm and "Good" or "Bad")
+    end, 1)
+    UI.chip(chips, "Tower", function()
+        return S.towerOn
+    end, function()
+        S.towerOn = not S.towerOn
+        UI.toast(S.towerOn and "Towers on" or "Towers off", S.towerOn and "Good" or "Bad")
+    end, 2)
+    UI.chip(chips, "Chain", function()
+        return S.chainOn
+    end, function()
+        S.chainOn = not S.chainOn
+        UI.toast(S.chainOn and "Chain on" or "Chain off", S.chainOn and "Good" or "Bad")
+    end, 3)
+    UI.chip(chips, "Sell now", nil, function()
+        SYS.sell(true)
+        UI.toast(S.lastSell ~= "" and S.lastSell or "nothing to sell", "Good")
+    end, 4)
+
+    -- open animation
+    el.card.BackgroundTransparency = 1
+    UI.tween(el.card, MOTION.Slow, { BackgroundTransparency = 0 })
+    UI.tween(el.scale, MOTION.Spring, { Scale = 1 })
+
+    UI.track(UserInputService.InputBegan:Connect(function(input, gp)
+        if not gp and input.KeyCode == Enum.KeyCode.RightControl then
+            UI.visible = not UI.visible
+            UI.gui.Enabled = UI.visible
         end
-        local args = table.pack(...)
-        task.spawn(function()
-            local ok, err = pcall(fn, table.unpack(args, 1, args.n))
-            if not ok then
-                print("[UIFX] callback error: " .. tostring(err))
-                win:Notify(tostring(err), "Bad", 5)
-            end
-        end)
-    end
+    end))
 
-    -- ── tabs ──
-    local function selectTab(tab)
-        for _, t in ipairs(win.Tabs) do
-            local on = t == tab
-            t.Page.Visible = on
-            tween(t.TabButton, Motion.Fast, {
-                BackgroundTransparency = on and 0 or 1,
-                TextColor3 = on and Theme.Text or Theme.SubText,
-            })
-        end
-        indicator.Visible = true
-        local y = tab.TabButton.AbsolutePosition.Y - root.AbsolutePosition.Y
-        tween(indicator, Motion.Spring, {
-            Position = UDim2.fromOffset(10, y / scale.Scale + 7),
-        })
-        tab.Page.Position = UDim2.fromOffset(0, 8)
-        tween(tab.Page, Motion.Base, { Position = UDim2.fromOffset(0, 0) })
-    end
-
-    function win:Tab(name)
-        local tab = {}
-        tab.TabButton = new("TextButton", {
-            AutoButtonColor = false,
-            BackgroundColor3 = Theme.Elevated,
-            BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 32),
-            Text = "      " .. name,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextSize = 13,
-            TextColor3 = Theme.SubText,
-            Font = Theme.Font,
-            LayoutOrder = #win.Tabs + 1,
-            Parent = sidebar,
-        }, { corner(6) })
-        tab.Page = new("ScrollingFrame", {
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            Size = UDim2.new(1, 0, 1, 0),
-            CanvasSize = UDim2.new(),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-            ScrollBarThickness = 3,
-            ScrollBarImageColor3 = Theme.Stroke,
-            Visible = false,
-            Parent = pages,
-        }, { padding(10) })
-        new("UIListLayout", {
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            Parent = tab.Page,
-        })
-        table.insert(win.Tabs, tab)
-        local order = 0
-
-        track(tab.TabButton.MouseButton1Click:Connect(function()
-            selectTab(tab)
-        end))
-
-        local function row(height)
-            order = order + 1
-            return new("Frame", {
-                BackgroundColor3 = Theme.Panel,
-                Size = UDim2.new(1, 0, 0, height or 38),
-                LayoutOrder = order,
-                Parent = tab.Page,
-            }, { corner(), stroke(Theme.Stroke, 0.3) })
-        end
-
-        local function hover(target)
-            track(target.MouseEnter:Connect(function()
-                tween(target, Motion.Fast, { BackgroundColor3 = Theme.Elevated })
-            end))
-            track(target.MouseLeave:Connect(function()
-                tween(target, Motion.Fast, { BackgroundColor3 = Theme.Panel })
-            end))
-        end
-
-        function tab:Section(text)
-            order = order + 1
-            local l = label(string.upper(text), 11, Theme.SubText, Theme.FontBold)
-            l.Size = UDim2.new(1, 0, 0, 22)
-            l.LayoutOrder = order
-            l.Parent = tab.Page
-            return l
-        end
-
-        function tab:Button(text, callback)
-            order = order + 1
-            local b = new("TextButton", {
-                AutoButtonColor = false,
-                ClipsDescendants = true,
-                BackgroundColor3 = Theme.Panel,
-                Size = UDim2.new(1, 0, 0, 38),
-                Text = "",
-                LayoutOrder = order,
-                Parent = tab.Page,
-            }, { corner(), stroke(Theme.Stroke, 0.3) })
-            local l = label(text, 13)
-            l.Position = UDim2.fromOffset(12, 0)
-            l.Size = UDim2.new(1, -24, 1, 0)
-            l.Parent = b
-            hover(b)
-            local busy = false
-            local obj = {}
-            track(b.MouseButton1Click:Connect(function()
-                ripple(b)
-                if busy then
-                    return
-                end
-                run(callback)
-            end))
-            track(b.MouseButton1Down:Connect(function()
-                tween(b, Motion.Fast, { BackgroundColor3 = Theme.Stroke })
-            end))
-            -- Lock while a long job runs: obj:SetBusy(true) ... obj:SetBusy(false)
-            function obj:SetBusy(on)
-                busy = on
-                tween(l, Motion.Fast, { TextTransparency = on and 0.5 or 0 })
-            end
-            function obj:SetText(t)
-                l.Text = t
-            end
-            return obj
-        end
-
-        function tab:Toggle(text, default, callback)
-            local r = row(38)
-            local l = label(text, 13)
-            l.Position = UDim2.fromOffset(12, 0)
-            l.Size = UDim2.new(1, -70, 1, 0)
-            l.Parent = r
-            local track_ = new("Frame", {
-                AnchorPoint = Vector2.new(1, 0.5),
-                Position = UDim2.new(1, -12, 0.5, 0),
-                Size = UDim2.fromOffset(36, 20),
-                BackgroundColor3 = Theme.Elevated,
-                Parent = r,
-            }, { corner(9999), stroke(Theme.Stroke) })
-            local knob = new("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 3, 0.5, 0),
-                Size = UDim2.fromOffset(14, 14),
-                BackgroundColor3 = Theme.SubText,
-                Parent = track_,
-            }, { corner(9999) })
-            local hit = new("TextButton", {
-                BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 1, 0),
-                Text = "",
-                Parent = r,
-            })
-            hover(r)
-
-            local obj = { Value = false }
-            function obj:Set(v, silent)
-                obj.Value = v and true or false
-                tween(knob, Motion.Spring, {
-                    Position = obj.Value and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
-                    BackgroundColor3 = obj.Value and Theme.Text or Theme.SubText,
-                })
-                tween(track_, Motion.Base, {
-                    BackgroundColor3 = obj.Value and Theme.Accent or Theme.Elevated,
-                })
-                if not silent then
-                    run(callback, obj.Value)
-                end
-            end
-            track(hit.MouseButton1Click:Connect(function()
-                obj:Set(not obj.Value)
-            end))
-            obj:Set(default, true)
-            if default then
-                run(callback, true)
-            end
-            return obj
-        end
-
-        function tab:Slider(text, min, max, default, step, callback)
-            step = step or 1
-            local r = row(54)
-            local l = label(text, 13)
-            l.Position = UDim2.fromOffset(12, 6)
-            l.Size = UDim2.new(1, -90, 0, 18)
-            l.Parent = r
-            local valueLabel = label("", 13, Theme.SubText)
-            valueLabel.TextXAlignment = Enum.TextXAlignment.Right
-            valueLabel.Position = UDim2.new(1, -82, 0, 6)
-            valueLabel.Size = UDim2.fromOffset(70, 18)
-            valueLabel.Parent = r
-            local bar = new("Frame", {
-                Position = UDim2.new(0, 12, 0, 34),
-                Size = UDim2.new(1, -24, 0, 6),
-                BackgroundColor3 = Theme.Elevated,
-                Parent = r,
-            }, { corner(9999) })
-            local fill = new("Frame", {
-                Size = UDim2.fromScale(0, 1),
-                BackgroundColor3 = Theme.Accent,
-                Parent = bar,
-            }, { corner(9999) })
-            local knob = new("Frame", {
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.fromScale(0, 0.5),
-                Size = UDim2.fromOffset(12, 12),
-                BackgroundColor3 = Theme.Text,
-                Parent = bar,
-            }, { corner(9999) })
-
-            local obj = { Value = default or min }
-            local function render(instant)
-                local a = (obj.Value - min) / (max - min)
-                local info = instant and TweenInfo.new(0) or Motion.Fast
-                tween(fill, info, { Size = UDim2.fromScale(a, 1) })
-                tween(knob, info, { Position = UDim2.fromScale(a, 0.5) })
-                valueLabel.Text = tostring(obj.Value)
-            end
-            function obj:Set(v, silent)
-                v = math.clamp(v, min, max)
-                v = min + math.floor((v - min) / step + 0.5) * step
-                if v == obj.Value and not silent then
-                    return
-                end
-                obj.Value = v
-                render(false)
-                if not silent then
-                    run(callback, v)
-                end
-            end
-
-            local dragging = false
-            local function fromPointer()
-                local x = UserInputService:GetMouseLocation().X
-                local a = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
-                obj:Set(min + (max - min) * a)
-            end
-            track(r.InputBegan:Connect(function(input)
-                if isPointer(input) then
-                    dragging = true
-                    tween(knob, Motion.Fast, { Size = UDim2.fromOffset(16, 16) })
-                    fromPointer()
-                end
-            end))
-            track(UserInputService.InputEnded:Connect(function(input)
-                if dragging and isPointer(input) then
-                    dragging = false
-                    tween(knob, Motion.Fast, { Size = UDim2.fromOffset(12, 12) })
-                end
-            end))
-            track(UserInputService.InputChanged:Connect(function(input)
-                if dragging and isMove(input) then
-                    fromPointer()
-                end
-            end))
-            render(true)
-            return obj
-        end
-
-        function tab:Dropdown(text, options, default, callback)
-            local r = row(38)
-            r.ClipsDescendants = true
-            local head = new("TextButton", {
-                BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 0, 38),
-                Text = "",
-                Parent = r,
-            })
-            local l = label(text, 13)
-            l.Position = UDim2.fromOffset(12, 0)
-            l.Size = UDim2.new(0.5, -12, 1, 0)
-            l.Parent = head
-            local current = label("", 13, Theme.SubText)
-            current.TextXAlignment = Enum.TextXAlignment.Right
-            current.Position = UDim2.new(0.5, 0, 0, 0)
-            current.Size = UDim2.new(0.5, -32, 1, 0)
-            current.Parent = head
-            local arrow = label("▾", 13, Theme.SubText)
-            arrow.TextXAlignment = Enum.TextXAlignment.Center
-            arrow.AnchorPoint = Vector2.new(1, 0)
-            arrow.Position = UDim2.new(1, -8, 0, 0)
-            arrow.Size = UDim2.fromOffset(18, 38)
-            arrow.Parent = head
-            local list = new("Frame", {
-                BackgroundTransparency = 1,
-                Position = UDim2.fromOffset(6, 40),
-                Size = UDim2.new(1, -12, 0, 0),
-                AutomaticSize = Enum.AutomaticSize.Y,
-                Parent = r,
-            })
-            new("UIListLayout", { Padding = UDim.new(0, 2), Parent = list })
-
-            local obj = { Value = default, Options = {} }
-            local open = false
-            local function setOpen(v)
-                open = v
-                local h = open and (44 + #obj.Options * 30) or 38
-                tween(r, Motion.Base, { Size = UDim2.new(1, 0, 0, h) })
-                tween(arrow, Motion.Base, { Rotation = open and 180 or 0 })
-            end
-            function obj:Set(v, silent)
-                obj.Value = v
-                current.Text = v and tostring(v) or "—"
-                if not silent then
-                    run(callback, v)
-                end
-            end
-            function obj:Refresh(newOptions)
-                obj.Options = newOptions
-                list:ClearAllChildren()
-                new("UIListLayout", { Padding = UDim.new(0, 2), Parent = list })
-                for _, opt in ipairs(newOptions) do
-                    local o = new("TextButton", {
-                        AutoButtonColor = false,
-                        BackgroundColor3 = Theme.Panel,
-                        Size = UDim2.new(1, 0, 0, 28),
-                        Text = "  " .. tostring(opt),
-                        TextXAlignment = Enum.TextXAlignment.Left,
-                        TextSize = 13,
-                        TextColor3 = Theme.Text,
-                        Font = Theme.Font,
-                        Parent = list,
-                    }, { corner(6) })
-                    o.MouseEnter:Connect(function()
-                        tween(o, Motion.Fast, { BackgroundColor3 = Theme.Elevated })
-                    end)
-                    o.MouseLeave:Connect(function()
-                        tween(o, Motion.Fast, { BackgroundColor3 = Theme.Panel })
-                    end)
-                    o.MouseButton1Click:Connect(function()
-                        obj:Set(opt)
-                        setOpen(false)
-                    end)
-                end
-                if open then
-                    setOpen(true)
-                end
-            end
-            track(head.MouseButton1Click:Connect(function()
-                setOpen(not open)
-            end))
-            obj:Refresh(options or {})
-            obj:Set(default, true)
-            return obj
-        end
-
-        -- Live status panel. :Set() is safe from any thread; the window's
-        -- Heartbeat applies the text.
-        function tab:Status(titleText)
-            local r = row(58)
-            r.AutomaticSize = Enum.AutomaticSize.Y
-            local t = label(titleText, 12, Theme.SubText, Theme.FontBold)
-            t.Position = UDim2.fromOffset(12, 8)
-            t.Size = UDim2.new(1, -24, 0, 16)
-            t.Parent = r
-            local body = label("…", 13, Theme.Text)
-            body.TextWrapped = true
-            body.TextYAlignment = Enum.TextYAlignment.Top
-            body.AutomaticSize = Enum.AutomaticSize.Y
-            body.Position = UDim2.fromOffset(12, 28)
-            body.Size = UDim2.new(1, -24, 0, 18)
-            body.Parent = r
-            new("UIPadding", { PaddingBottom = UDim.new(0, 10), Parent = r })
-            local dot = new("Frame", {
-                AnchorPoint = Vector2.new(1, 0),
-                Position = UDim2.new(1, -12, 0, 12),
-                Size = UDim2.fromOffset(8, 8),
-                BackgroundColor3 = Theme.SubText,
-                Parent = r,
-            }, { corner(9999) })
-
-            local s = { body = body, text = "…", color = Theme.Text, dirty = false }
-            table.insert(statuses, s)
-            local obj = {}
-            function obj:Set(text, kind)
-                s.text = tostring(text)
-                s.color = kind and Theme[kind] or Theme.Text
-                s.dirty = true
-            end
-            -- Pulse the dot while work is running: obj:SetActive(true/false)
-            local pulse
-            function obj:SetActive(on)
-                if pulse then
-                    pulse:Cancel()
-                    pulse = nil
-                end
-                dot.BackgroundTransparency = 0
-                dot.BackgroundColor3 = on and Theme.Good or Theme.SubText
-                if on then
-                    pulse = tween(dot, TweenInfo.new(0.8, Enum.EasingStyle.Sine,
-                        Enum.EasingDirection.InOut, -1, true), { BackgroundTransparency = 0.7 })
-                end
-            end
-            return obj
-        end
-
-        if #win.Tabs == 1 then
-            task.defer(function()
-                selectTab(tab)
-            end)
-        end
-        return tab
-    end
-
-    task.defer(function()
-        win:Show()
-    end)
-    return win
+    UI.track(RunService.Heartbeat:Connect(UI.frame))
 end
 
-return UIFX
-
-end)()
-
-local UI = { win = nil, farm = nil, progress = nil, tower = nil, chain = nil, logs = nil }
-do
-    UI.win = UIFX.Window({
-        Title = "Anime Dice · Chain",
-        Size = UDim2.fromOffset(540, 400),
-        ToggleKey = Enum.KeyCode.RightControl,
-        OnClose = function()
-            -- a newer run replacing this window must keep running: only clear our own token
-            if LP:GetAttribute("AnimeDiceRun") == TOKEN then
-                LP:SetAttribute("AnimeDiceRun", nil)
-                log("stopped (window closed)")
-            end
-        end,
+function UI.setPhase(key)
+    local ph = PHASES[key] or PHASES.FARM
+    local el = UI.el
+    UI.phase = key
+    el.title.Text = ph.title
+    el.title.TextTransparency = 1
+    el.title.Position = UDim2.fromOffset(78, 18)
+    UI.tween(el.title, MOTION.Slow, { TextTransparency = 0, Position = UDim2.fromOffset(78, 10) })
+    UI.tween(el.core, MOTION.Base, { BackgroundColor3 = ph.color })
+    UI.tween(el.halo, MOTION.Base, { BackgroundColor3 = ph.color })
+    UI.tween(el.fill, MOTION.Base, { BackgroundColor3 = ph.color })
+    el.ringStroke.Color = ph.color
+    el.sweep.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, TH.Stroke),
+        ColorSequenceKeypoint.new(0.5, ph.color),
+        ColorSequenceKeypoint.new(1, TH.Stroke),
     })
-    local main = UI.win:Tab("Status")
-    UI.farm = main:Status("FARM")
-    UI.progress = main:Status("PROGRESS")
-    UI.tower = main:Status("TOWER")
-    UI.chain = main:Status("CHAIN")
-    UI.logs = main:Status("LOG")
+    if key == "SUCCESS" then
+        UI.burst(ph.color)
+        UI.toast("Success! units handed over", "Good")
+    end
+end
 
-    local ctl = UI.win:Tab("Controls")
-    ctl:Section("Toggles")
-    ctl:Toggle("Farm (roll · sell · buy · rebirth)", S.farm, function(on)
-        S.farm = on
-    end)
-    ctl:Toggle("Towers", S.towerOn, function(on)
-        S.towerOn = on
-    end)
-    ctl:Toggle("Chain build", S.chainOn, function(on)
-        S.chainOn = on
-    end)
-    ctl:Section("Actions")
-    ctl:Button("Sell overflow now", function()
-        SYS.sell(true)
-        UI.win:Notify(S.lastSell, "Good", 3)
-    end)
-    ctl:Button("Re-redeem codes", function()
-        S.codesDone = false
-        SYS.rewards()
-    end)
-    ctl:Button("Write chain file now", function()
-        CH.write()
-        UI.win:Notify("wrote " .. chainFile(LP.Name), "Good", 3)
-    end)
+-- per frame: orb pulse, border sweep, active chain node breathing
+function UI.frame(dt)
+    if not UI.gui or not UI.gui.Parent then
+        UI.destroy()
+        return
+    end
+    local el = UI.el
+    local ph = PHASES[UI.phase or "FARM"] or PHASES.FARM
+    local t = os.clock()
+    local wave = (t * ph.pulse) % 1
+    el.ringScale.Scale = 0.55 + wave * 0.75
+    el.ringStroke.Transparency = wave
+    el.halo.Size = UDim2.fromOffset(26 + math.sin(t * 3) * 3, 26 + math.sin(t * 3) * 3)
+    el.sweep.Rotation = (el.sweep.Rotation + ph.sweep * dt) % 360
+    if UI.activeNode then
+        UI.activeNode.scale.Scale = 1 + math.sin(t * 4) * 0.12
+    end
+    if os.clock() >= UI.refreshAt then
+        UI.refreshAt = os.clock() + 0.5
+        local ok, err = pcall(UI.refresh)
+        if not ok then
+            UI.refreshErr = (UI.refreshErr or 0) + 1
+            if UI.refreshErr % 20 == 1 then
+                log("ui error: " .. tostring(err), "Bad")
+            end
+        end
+    end
 end
 
 function UI.refresh()
-    local count, cap = H.storage()
-    UI.farm:Set(string.format("%s · %d rolls/min · units %d/%d\n$%s (+%s/s) · %s\n%s",
-        S.farm and (S.pauseRoll and "paused for trade" or "running") or "off",
-        SYS.rollsPerMin(), count, cap,
-        H.fmt(D.Money()), H.fmt(H.incomePerSec()), S.lastSell ~= "" and S.lastSell or "no sale yet",
-        S.lastSpend ~= "" and ("last buy: " .. S.lastSpend) or ""), S.farm and "Text" or "Warn")
-    UI.farm:SetActive(S.farm and not S.pauseRoll)
-
-    local mx = SYS.maxed()
-    UI.progress:Set(string.format("Rebirth %d/%d · Dice %s (top %s)\nUpgrades %d/%d · tickets %d\n%s",
-        D.Rebirth(), S.rebirthTarget, tostring(D.Dice()), tostring(S.topDice),
-        H.upgradesOwned(), S.upgradeTotal, H.tickets(),
-        mx.ok and "MAXED (" .. table.concat(CFG.Chain.MaxedWhen, "+") .. ")" or ("need: " .. mx.text)),
-        mx.ok and "Good" or "Text")
-
-    local tw = S.tower
-    UI.tower:Set(string.format("%s · %s floor %d (sim %d) · runs %d",
-        S.towerOn and "on" or "off", tw.name, tw.floor, tw.predicted, tw.runs) .. "\n" .. tostring(tw.msg))
-    UI.tower:SetActive(S.towerOn and tw.msg == "running")
-
-    local ch = S.chain
-    UI.chain:Set((S.chainOn and (ch.role .. " · " .. ch.phase) or "off") .. "\n" .. tostring(ch.msg)
-        .. "\nAFK guard: " .. S.afk .. " · rejoin: " .. S.rejoin, ch.done and "Good" or (ch.phase == "send" or ch.phase == "host") and "Accent" or "Text")
-    UI.chain:SetActive(S.chainOn and (ch.phase == "send" or ch.phase == "host"))
-
-    local lines = {}
-    for _, l in ipairs(S.logLines) do
-        table.insert(lines, l.text)
+    local el = UI.el
+    local key = UI.phaseKey()
+    if key ~= UI.phase then
+        UI.setPhase(key)
     end
-    UI.logs:Set(#lines > 0 and table.concat(lines, "\n") or "-")
+    local ch = S.chain
+    local order = CFG.Chain.Order
+
+    -- header badge: position in chain
+    el.badge.Text = (S.chainOn and ch.myIndex) and ("#" .. ch.myIndex .. " / " .. #order) or LP.Name
+    el.sub.Text = "· " .. (MGR.lastName ~= "?" and MGR.lastName ~= "nil" and MGR.lastName or "CHAIN")
+
+    -- detail line under the title
+    local detail
+    if key == "BUILD" or key == "FARM" then
+        detail = string.gsub(string.gsub(UI.activity(), "^Build %(", ""), "%)$", "")
+        if key == "FARM" then
+            detail = "Rebirth " .. D.Rebirth() .. "/" .. S.rebirthTarget .. " · Dice " .. tostring(D.Dice())
+        end
+    elseif key == "WAIT" then
+        detail = (ch.role == "builder" and "→ " or "← ") .. tostring(ch.target)
+    elseif key == "JOIN" then
+        detail = "→ " .. tostring(ch.target) .. "'s server"
+    elseif key == "TRADE" then
+        detail = "with " .. tostring(ch.target) .. " · " .. tostring(T.phase)
+    elseif key == "SUCCESS" then
+        detail = (string.gsub(ch.msg, "^DONE · ", ""))
+    elseif key == "QUEUE" then
+        detail = "builder " .. tostring(ch.builderName or "?")
+    else
+        detail = "farm paused"
+    end
+    el.detail.Text = detail
+    el.msg.Text = tostring(ch.msg or "")
+
+    -- goal bar
+    local frac, right = UI.goal(key)
+    el.barLabel.Text = (key == "QUEUE" or key == "JOIN") and "CHAIN TURN" or "GOAL"
+    el.barValue.Text = right
+    if UI.lastFrac ~= frac then
+        UI.lastFrac = frac
+        UI.tween(el.fill, MOTION.Slow, { Size = UDim2.fromScale(math.max(frac, 0.02), 1) })
+    end
+
+    -- chain track
+    local me = ch.myIndex
+    el.chainRow.Visible = S.chainOn and me ~= nil
+    if me then
+        local first = math.clamp(me - 2, 1, math.max(1, #order - 4))
+        local bi = ch.builderIdx or me
+        UI.activeNode = nil
+        local doneCount = 0
+        for i = 1, 5 do
+            local idx = first + i - 1
+            local n = UI.nodes[i]
+            local name = order[idx]
+            n.dot.Visible = name ~= nil
+            n.name.Visible = name ~= nil
+            if name then
+                n.name.Text = (idx == me and "you" or string.sub(name, 1, 8))
+                n.name.TextColor3 = idx == me and TH.Text or TH.Dim
+                local color, strokeColor = TH.Elevated, TH.Stroke
+                if ch.done and idx == me then
+                    color = TH.Good
+                elseif idx < bi then
+                    color = TH.Good
+                    doneCount = i
+                elseif idx == bi then
+                    color = (PHASES[key] or PHASES.BUILD).color
+                    UI.activeNode = n
+                end
+                if idx == me then
+                    strokeColor = TH.Text
+                end
+                n.dot.BackgroundColor3 = color
+                n.stroke.Color = strokeColor
+                n.stroke.Thickness = idx == me and 2 or 1
+                if UI.activeNode ~= n then
+                    n.scale.Scale = 1
+                end
+            end
+        end
+        el.lineDone.Size = UDim2.fromScale(math.clamp((doneCount - 0.5) / 4, 0, 1), 1)
+    end
+
+    -- stats
+    local count, cap = H.storage()
+    el.sMoney.Text = "$" .. H.fmt(D.Money())
+    el.sIncome.Text = H.fmt(H.incomePerSec())
+    el.sRolls.Text = tostring(SYS.rollsPerMin())
+    el.sUnits.Text = count .. "/" .. cap
+    el.sUnits.TextColor3 = (cap - count < CFG.Sell.FreeSlots) and PHASES.WAIT.color or TH.Text
+
+    -- tower + newest log line (typed out when it changes)
+    local tw = S.tower
+    el.tower.Text = S.towerOn and string.format("TOWER  %s · floor %d (sim %d) · runs %d",
+        tw.name, tw.floor, tw.predicted, tw.runs) or "TOWER  off"
+    local newest = S.logLines[1]
+    if newest and newest.text ~= UI.lastLog then
+        UI.lastLog = newest.text
+        el.log.Text = "› " .. newest.text
+        el.log.TextColor3 = newest.kind == "Bad" and TH.Bad or (newest.kind == "Good" and TH.Good or TH.Text)
+        el.log.MaxVisibleGraphemes = 0
+        task.spawn(function()
+            local total = utf8.len(el.log.Text) or #el.log.Text
+            for i = 1, total do
+                if el.log.Text ~= "› " .. newest.text then
+                    return
+                end
+                el.log.MaxVisibleGraphemes = i
+                task.wait(0.012)
+            end
+            el.log.MaxVisibleGraphemes = -1
+        end)
+    end
+
+    -- chips
+    for _, c in ipairs(UI.chips) do
+        if c.getOn then
+            local on = c.getOn() and true or false
+            if on ~= c.last then
+                c.last = on
+                UI.tween(c.button, MOTION.Base, {
+                    BackgroundColor3 = on and (PHASES.BUILD.color) or TH.Elevated,
+                    TextColor3 = on and TH.Text or TH.Sub,
+                })
+            end
+        end
+    end
 end
+
+function UI.destroy()
+    for _, c in ipairs(UI.conns) do
+        pcall(function()
+            c:Disconnect()
+        end)
+    end
+    table.clear(UI.conns)
+    if UI.gui then
+        local g = UI.gui
+        UI.gui = nil
+        pcall(function()
+            g:Destroy()
+        end)
+    end
+end
+
 
 -- what this account is doing right now, in one readable line for the account manager:
 --   Build (Dice Genesis → Skeleton)      still building; lists only what Chain.MaxedWhen needs
@@ -3002,21 +2847,17 @@ task.spawn(SYS.economyLoop)
 task.spawn(SYS.towerLoop)
 task.spawn(SYS.slowLoop)
 task.spawn(CH.loop)
-task.spawn(function()
-    local n = 0
-    while alive() do
-        n = n + 1
-        local ok, err = pcall(UI.refresh)
-        if not ok and n % 10 == 1 then
-            log("ui error: " .. tostring(err), "Bad")
-        end
-        if n % 10 == 0 then
-            pcall(UI.manager)
-        end
-        task.wait(1)
+do
+    local ok, err = pcall(UI.build)
+    if not ok then
+        log("ui build error: " .. tostring(err), "Bad")
     end
-    pcall(function()
-        UI.win:Destroy()
-    end)
+end
+task.spawn(function()
+    while alive() do
+        pcall(UI.manager)
+        task.wait(10)
+    end
+    UI.destroy()
 end)
-UI.win:Notify("Anime Dice loaded · RightCtrl hides", "Good", 4)
+UI.toast("Anime Dice loaded · RightCtrl hides", "Good")
