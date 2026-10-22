@@ -2315,7 +2315,7 @@ function UI.build()
         Size = UDim2.fromOffset(90, 40),
         Parent = header,
     })
-    el.sub = UI.label("· CHAIN", 13, TH.Dim, TH.Bold, {
+    el.sub = UI.label("· Linggung", 13, TH.Dim, TH.Bold, {
         Position = UDim2.fromOffset(100, 0),
         Size = UDim2.fromOffset(120, 40),
         Parent = header,
@@ -2629,7 +2629,6 @@ function UI.refresh()
 
     -- header badge: position in chain
     el.badge.Text = (S.chainOn and ch.myIndex) and ("#" .. ch.myIndex .. " / " .. #order) or LP.Name
-    el.sub.Text = "· " .. (MGR.lastName ~= "?" and MGR.lastName ~= "nil" and MGR.lastName or "CHAIN")
 
     -- detail line under the title
     local detail
