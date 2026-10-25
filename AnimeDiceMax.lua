@@ -569,11 +569,25 @@ function SYS.sellNow(force)
     local keep = H.protected(units)
     local threshold = tonumber(CFG.Sell.KeepIncomeAbove) or 0
     local list = {}
+    local spare = {}
     for _, u in ipairs(units) do
         if not plotted[u.key] and not keep[u.key] and not u.attrs.locked then
             if threshold <= 0 or u.income < threshold then
                 table.insert(list, u.key)
+            else
+                table.insert(spare, u)
             end
+        end
+    end
+    -- KeepIncomeAbove is a preference, not a wall: if keeping them would leave no room to
+    -- roll, the weakest of the kept ones go too
+    local freeAfter = (cap - #units) + #list
+    if freeAfter < need and #spare > 0 then
+        table.sort(spare, function(a, b)
+            return a.income < b.income
+        end)
+        for i = 1, math.min(#spare, need - freeAfter) do
+            table.insert(list, spare[i].key)
         end
     end
     if #list == 0 then
@@ -587,6 +601,43 @@ function SYS.sellNow(force)
         S.lastSell = "sell error: " .. tostring(money)
         log(S.lastSell, "Bad")
     end
+end
+
+-- The trade is refused when either side would end above its Unit Storage after the swap
+-- (TradeClass:CollectTransfers). Sell the weakest sellable units until count <= maxCount.
+function SYS.makeRoom(maxCount)
+    local units = H.units()
+    local cap = H.buff("Unit Storage")
+    local over = #units - maxCount
+    if over <= 0 then
+        return true, #units, cap
+    end
+    local plotted = H.plotted()
+    local keep = H.protected(units)
+    local cands = {}
+    for _, u in ipairs(units) do
+        if not plotted[u.key] and not keep[u.key] and not u.attrs.locked then
+            table.insert(cands, u)
+        end
+    end
+    table.sort(cands, function(a, b)
+        return a.income < b.income
+    end)
+    local list = {}
+    for i = 1, math.min(over, #cands) do
+        table.insert(list, cands[i].key)
+    end
+    if #list > 0 then
+        local ok, money, n = invoke(R.Sell, list)
+        if ok then
+            log("made room for the trade: sold " .. tostring(n or #list) .. " for $" .. H.fmt(money or 0))
+        else
+            log("make room sell error: " .. tostring(money), "Bad")
+        end
+        task.wait(1.5)
+    end
+    local after = #H.units()
+    return after <= maxCount, after, cap
 end
 
 -- ── roll ────────────────────────────────────────────────────
@@ -1613,6 +1664,13 @@ function CH.sendTo(target)
         return false, "nothing to send (check Chain.Units spelling)"
     end
     S.pauseRoll = true
+    do
+        local okRoom, cnt, cap = SYS.makeRoom(H.buff("Unit Storage"))
+        if not okRoom then
+            S.pauseRoll = false
+            return false, "own unit storage " .. cnt .. "/" .. cap .. " and nothing sellable"
+        end
+    end
     S.pauseSell = true
     local started = false
     for attempt = 1, 4 do
@@ -1801,6 +1859,16 @@ function CH.tick()
                 .. (public and (" (" .. slots .. " free)") or " (PRIVATE server - can't trade here)")
             return
         end
+        -- stop rolling from here on (rolled units land seconds later) and get under the cap:
+        -- after giving our units away we must not be above Unit Storage
+        S.pauseRoll = true
+        do
+            local okRoom, cnt, cap = SYS.makeRoom(H.buff("Unit Storage"))
+            if not okRoom then
+                S.chain.msg = "own storage " .. cnt .. "/" .. cap .. " - nothing sellable, trade would be refused"
+                return
+            end
+        end
         local myWait = CFG.Trade.WaitAfterJoin - (os.time() - S.joinedAt)
         local theirWait = CFG.Trade.WaitAfterJoin - (os.time() - (st.joinedAt or 0))
         local waitLeft = math.max(myWait, theirWait)
@@ -1868,6 +1936,10 @@ function CH.tick()
     local _, _, free = H.storage()
     if free < math.max(CFG.Sell.FreeSlots, 6) and not T.active then
         SYS.sell(true)
+    end
+    if builderHere and not T.active then
+        local incoming = #CFG.Chain.Units > 0 and (#CFG.Chain.Units + 2) or (CFG.Chain.TopUnits + 2)
+        SYS.makeRoom(H.buff("Unit Storage") - incoming)
     end
     if not builderHere then
         local open = (bs.maxPlayers or 0) - (bs.players or 0)
