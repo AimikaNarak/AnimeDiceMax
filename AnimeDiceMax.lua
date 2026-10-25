@@ -201,6 +201,26 @@ do
 end
 local D = M.Data
 
+do
+    local raw = CFG.Sell.KeepIncomeAbove
+    local value = nil
+    if type(raw) == "number" then
+        value = raw
+    elseif type(raw) == "string" then
+        local ok, v = pcall(M.NF.ParseCompact, raw)
+        if ok and type(v) == "number" then
+            value = v
+        end
+    end
+    if value == nil then
+        -- unreadable: keep everything rather than sell what the user meant to keep
+        print("[AnimeDice] Sell.KeepIncomeAbove = " .. tostring(raw) .. " is not a number like 1e16 or \"10qd\" - keeping all units")
+        value = 1e-9
+        S.keepParseError = tostring(raw)
+    end
+    CFG.Sell.KeepIncomeAbove = value
+end
+
 -- ── remotes (raw, never through the game's wrapper) ─────────
 local R = {}
 do
@@ -2903,6 +2923,13 @@ end
 -- ════════════════════════════════════════════════════════════
 log(string.format("loaded · %s · rebirth %d/%d · top dice %s · %d upgrades · PlaceId %d",
     LP.Name, D.Rebirth(), S.rebirthTarget, tostring(S.topDice), S.upgradeTotal, game.PlaceId))
+if S.keepParseError then
+    log("KeepIncomeAbove \"" .. S.keepParseError .. "\" unreadable - keeping all units (use e.g. \"10qd\" or 1e16)", "Bad")
+elseif CFG.Sell.KeepIncomeAbove > 0 then
+    log("sell: keeping units at or above $" .. H.fmt(CFG.Sell.KeepIncomeAbove) .. "/s")
+else
+    log("sell: selling every unit that is not plotted")
+end
 if game.PrivateServerId ~= "" then
     log("private server: trading is disabled here by the game", "Warn")
 end
