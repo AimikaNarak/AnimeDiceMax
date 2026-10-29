@@ -57,7 +57,8 @@ local S = {
         running = false,
         wait = 60,           -- seconds in the same server before trading
         follow = false,      -- senders teleport to the receiver's server
-        manager = "None",    -- None | Storm | Masterp | Horst: told "finished" when a sender is done
+        manager = "Storm",   -- None | Storm | Masterp | Horst: told "finished" when a sender is done
+        managerPicked = false, -- false = never changed in the UI -> always Storm
         rev = 0,
     },
     planRev = -1,
@@ -322,7 +323,9 @@ function FS.loadPlan()
         S.plan.running = p.running == true
         S.plan.wait = tonumber(p.wait) or 60
         S.plan.follow = p.follow == true
-        S.plan.manager = type(p.manager) == "string" and p.manager or "None"
+        -- Storm unless someone picked another option in the Run page
+        S.plan.managerPicked = p.managerPicked == true
+        S.plan.manager = (S.plan.managerPicked and type(p.manager) == "string") and p.manager or "Storm"
         S.plan.rev = p.rev
         return true
     end
@@ -2153,6 +2156,7 @@ function UI.buildRun(page)
         return S.plan.manager
     end, function(v)
         S.plan.manager = v
+        S.plan.managerPicked = v ~= "Storm"
         FS.savePlan()
         el.mgrSeg.paint()
         UI.toast(v == "None" and "Senders stay in game when done" or ("Done senders → " .. v .. " finished"), "Good")
