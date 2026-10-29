@@ -57,6 +57,7 @@ local S = {
         running = false,
         wait = 60,           -- seconds in the same server before trading
         follow = false,      -- senders teleport to the receiver's server
+        manager = "None",    -- None | Storm | Masterp | Horst: told "finished" when a sender is done
         rev = 0,
     },
     planRev = -1,
@@ -321,6 +322,7 @@ function FS.loadPlan()
         S.plan.running = p.running == true
         S.plan.wait = tonumber(p.wait) or 60
         S.plan.follow = p.follow == true
+        S.plan.manager = type(p.manager) == "string" and p.manager or "None"
         S.plan.rev = p.rev
         return true
     end
@@ -356,6 +358,102 @@ function FS.status(name)
         return st
     end
     return st and { stale = true, phase = st.phase, sent = st.sent } or nil
+end
+
+-- ════════════════════════════════════════════════════════════
+-- ACCOUNT MANAGER: status text + "finished" when a sender has sent everything
+--   Storm   StormAccount.lua over localhost:3030 · acc:SetDescription · acc:MarkFinished
+--           (Storm closes Roblox on Finished and moves on to the next account)
+--   Masterp _G.Masterp_Description · _G.Masterp_Done
+--   Horst   _G.Horst_SetDescription · _G.Horst_AccountChangeDone ("|" ";" not allowed)
+-- ════════════════════════════════════════════════════════════
+local MGR = { storm = nil, stormTried = false, finished = false, lastFinish = 0, lastDesc = nil }
+
+function MGR.fn(name)
+    local f = rawget(_G, name)
+    if type(f) ~= "function" and getgenv then
+        f = rawget(getgenv(), name)
+    end
+    if type(f) ~= "function" and type(shared) == "table" then
+        f = rawget(shared, name)
+    end
+    return type(f) == "function" and f or nil
+end
+
+function MGR.stormAcc()
+    if MGR.storm or MGR.stormTried then
+        return MGR.storm
+    end
+    MGR.stormTried = true
+    local ok, lib = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Androssy/Storm-Launcher/refs/heads/main/StormAccount.lua"))()
+    end)
+    if ok and type(lib) == "table" and lib.new then
+        MGR.storm = lib.new(LP.Name)
+        log("Storm connected")
+    else
+        log("Storm: StormAccount.lua failed to load: " .. tostring(lib), "Bad")
+    end
+    return MGR.storm
+end
+
+function MGR.status(text)
+    if text == MGR.lastDesc then
+        return
+    end
+    MGR.lastDesc = text
+    local kind = S.plan.manager
+    if kind == "Storm" then
+        local acc = MGR.stormAcc()
+        if acc then
+            pcall(acc.SetDescription, acc, text)
+        end
+    elseif kind == "Masterp" and MGR.fn("Masterp_Description") then
+        pcall(MGR.fn("Masterp_Description"), text)
+    elseif kind == "Horst" and MGR.fn("Horst_SetDescription") then
+        pcall(MGR.fn("Horst_SetDescription"), (string.gsub(text, "[|;]", ",")))
+    end
+end
+
+-- called repeatedly while done; reports once per 30s until the manager closes the game
+function MGR.finish(text)
+    local kind = S.plan.manager
+    if kind == "None" or os.clock() - MGR.lastFinish < 30 then
+        return
+    end
+    MGR.lastFinish = os.clock()
+    local result = "?"
+    if kind == "Storm" then
+        local acc = MGR.stormAcc()
+        if acc then
+            local ok, res, err = pcall(acc.MarkFinished, acc, text)
+            result = ok and (res and "ok" or ("error " .. tostring(err))) or ("error " .. tostring(res))
+        else
+            result = "StormAccount not loaded"
+        end
+    elseif kind == "Masterp" then
+        local f = MGR.fn("Masterp_Done")
+        if f then
+            MGR.status(text)
+            local ok, res = pcall(f)
+            result = ok and ("ok " .. tostring(res)) or ("error " .. tostring(res))
+        else
+            result = "Masterp_Done not found"
+        end
+    elseif kind == "Horst" then
+        local f = MGR.fn("Horst_AccountChangeDone")
+        if f then
+            MGR.status(text)
+            local ok, res = pcall(f)
+            result = ok and ("ok " .. tostring(res)) or ("error " .. tostring(res))
+        else
+            result = "Horst_AccountChangeDone not found"
+        end
+    end
+    if not MGR.finished then
+        MGR.finished = true
+        log(kind .. " finished -> " .. result, result:sub(1, 2) == "ok" and "Good" or "Bad")
+    end
 end
 
 -- ════════════════════════════════════════════════════════════
@@ -490,6 +588,7 @@ local function senderTick()
             log("nothing left to send - done (" .. S.sent .. " sent)", "Good")
         end
         S.phase, S.msg = "done", "everything sent"
+        MGR.finish("Gift done · sent " .. S.sent .. " to " .. recv.name)
         return
     end
     local target = H.findPlayer(recv.name)
@@ -625,6 +724,10 @@ local function engineLoop()
         if not ok then
             log("engine error: " .. tostring(err), "Bad")
             task.wait(2)
+        end
+        if S.role ~= "editor" and plan.running and S.phase ~= "done" then
+            pcall(MGR.status, "Gift " .. S.role .. " · " .. string.upper(S.phase) .. " · sent " .. S.sent
+                .. (S.role == "sender" and (" · " .. S.remaining .. " left") or ""))
         end
         task.wait(S.role == "receiver" and 0.3 or 1)
     end
@@ -1514,7 +1617,7 @@ function UI.renderSenders()
             av.set(s.userId, TH.Stroke)
             local nm = UI.label(s.display or s.name, 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(58, 9),
                 Size = UDim2.new(1, -250, 0, 18), Parent = f })
-            UI.label("@" .. s.name, 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(58, 28),
+            UI.label("@" .. s.name .. "  ·  ID " .. tostring(s.userId or "?"), 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(58, 28),
                 Size = UDim2.new(1, -250, 0, 14), Parent = f })
             local pill = UI.chip(f, "OFFLINE", TH.Dim, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -48, 0.5, -7) })
             local info = UI.label("", 10, TH.Dim, TH.Font, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -48, 0.5, 6),
@@ -2039,14 +2142,30 @@ function UI.buildRun(page)
         FS.savePlan()
     end)
 
+    -- which account manager closes a sender once it has sent everything
+    local mgrRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 46), LayoutOrder = 2,
+        Parent = page }, { UI.corner(8), UI.stroke() })
+    set.LayoutOrder = 2
+    mgrRow.LayoutOrder = 3
+    UI.label("When a sender is done, mark it finished in", 12, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.new(1, -320, 1, 0), Parent = mgrRow })
+    el.mgrSeg = UI.segmented(mgrRow, { "None", "Storm", "Masterp", "Horst" }, function()
+        return S.plan.manager
+    end, function(v)
+        S.plan.manager = v
+        FS.savePlan()
+        el.mgrSeg.paint()
+        UI.toast(v == "None" and "Senders stay in game when done" or ("Done senders → " .. v .. " finished"), "Good")
+    end, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -5, 0.5, 0) })
+
     -- progress list
-    UI.section(page, "Progress", 3)
-    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 200), LayoutOrder = 4 })
+    UI.section(page, "Progress", 4)
+    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 150), LayoutOrder = 5 })
     UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.progress })
     el.progRows = {}
 
     -- log
-    local logBox = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 92), LayoutOrder = 5, Parent = page },
+    local logBox = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 92), LayoutOrder = 6, Parent = page },
         { UI.corner(8), UI.stroke(), UI.pad(8) })
     el.logLines = {}
     for i = 1, 5 do
@@ -2169,6 +2288,9 @@ function UI.frame(dt)
                 UI.paintAll()
                 el.waitBox.Text = tostring(S.plan.wait) .. "s"
                 el.followToggle.paint()
+                if el.mgrSeg then
+                    el.mgrSeg.paint()
+                end
                 if S.plan.receiver then
                     el.recvBox.Text = S.plan.receiver.name
                     UI.renderReceiver(S.plan.receiver, true)
