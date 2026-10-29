@@ -846,10 +846,28 @@ function ICON.workerLoop()
     while alive() do
         local job = table.remove(ICON.queue, 1)
         if job then
+            -- The game's icon carries its own hover/press springs (Ripple) that run on game
+            -- threads; under our executor GUI those writes fail with "lacking capability
+            -- Plugin" (seen 2026-10-30 on Volt). A Clone has the look but none of the
+            -- connections, so we keep the clone and destroy the original.
             local ok, icon = pcall(function()
                 return asGame(function()
                     local _, inst = M.EntryIcon.new({ name = job.name, key = job.key, tooltip = false })
-                    return inst
+                    local copy = inst:Clone()
+                    inst:Destroy()
+                    if not copy then
+                        error("icon is not cloneable")
+                    end
+                    -- re-point viewport cameras at the cloned cameras
+                    for _, vf in ipairs(copy:GetDescendants()) do
+                        if vf:IsA("ViewportFrame") then
+                            local cam = vf:FindFirstChildOfClass("Camera")
+                            if cam and vf.CurrentCamera ~= cam then
+                                vf.CurrentCamera = cam
+                            end
+                        end
+                    end
+                    return copy
                 end)
             end)
             table.insert(ICON.done, { job = job, icon = ok and icon or nil, err = not ok and icon or nil })
