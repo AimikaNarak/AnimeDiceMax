@@ -56,7 +56,9 @@ local S = {
         all = false,         -- send every tradeable entry
         running = false,
         wait = 60,           -- seconds in the same server before trading
-        follow = false,      -- senders teleport to the receiver's server
+        follow = true,       -- senders teleport to the receiver's server (queued)
+        followPicked = false,
+        batch = 4,           -- how many senders may be in the receiver's server at once
         manager = "Storm",   -- None | Storm | Masterp | Horst: told "finished" when a sender is done
         managerPicked = false, -- false = never changed in the UI -> always Storm
         rev = 0,
@@ -322,7 +324,9 @@ function FS.loadPlan()
         S.plan.all = p.all == true
         S.plan.running = p.running == true
         S.plan.wait = tonumber(p.wait) or 60
-        S.plan.follow = p.follow == true
+        S.plan.followPicked = p.followPicked == true
+        S.plan.follow = (not S.plan.followPicked) or p.follow == true
+        S.plan.batch = math.clamp(tonumber(p.batch) or 4, 1, 8)
         -- Storm unless someone picked another option in the Run page
         S.plan.managerPicked = p.managerPicked == true
         S.plan.manager = (S.plan.managerPicked and type(p.manager) == "string") and p.manager or "Storm"
@@ -595,9 +599,45 @@ local function senderTick()
         return
     end
     local target = H.findPlayer(recv.name)
+    -- check: the player in this server must be the exact account that was set (user id)
+    if target and recv.userId and target.UserId ~= recv.userId then
+        S.phase, S.msg = "error", "player " .. target.Name .. " has a different user id than the receiver"
+        return
+    end
     if not target then
         local st = FS.status(recv.name)
-        if plan.follow and st and not st.stale and st.jobId and st.jobId ~= game.JobId then
+        if not plan.follow then
+            S.phase, S.msg = "waiting", "waiting for " .. recv.name .. " in this server"
+            return
+        end
+        if not st or st.stale then
+            S.phase, S.msg = "waiting", recv.name .. " is offline (its script must be running)"
+            return
+        end
+        if not st.public then
+            S.phase, S.msg = "waiting", recv.name .. " is in a private server - can't join it"
+            return
+        end
+        -- queue: online senders that are not done, in list order; only the first N may join
+        local pos, ahead = nil, 0
+        for _, sd in ipairs(plan.senders) do
+            local me = H.lower(sd.name) == H.lower(LP.Name)
+            local sst = me and { phase = S.phase } or FS.status(sd.name)
+            if me then
+                pos = ahead + 1
+                break
+            end
+            if sst and not sst.stale and sst.phase ~= "done" then
+                ahead = ahead + 1
+            end
+        end
+        pos = pos or 1
+        local batch = math.clamp(tonumber(plan.batch) or 4, 1, 8)
+        if pos > batch then
+            S.phase, S.msg = "waiting", "queue #" .. pos .. " · joins when a spot frees (" .. batch .. " at once)"
+            return
+        end
+        if st.jobId and st.jobId ~= game.JobId then
             local open = (st.maxPlayers or 0) - (st.players or 0)
             if open >= 1 and os.time() - S.lastTp > 30 then
                 S.phase, S.msg = "joining", "joining " .. recv.name .. "'s server"
@@ -613,7 +653,7 @@ local function senderTick()
             S.phase, S.msg = "waiting", recv.name .. "'s server " .. (open >= 1 and "- retrying join" or "is full")
             return
         end
-        S.phase, S.msg = "waiting", "waiting for " .. recv.name .. " in this server"
+        S.phase, S.msg = "waiting", "waiting for " .. recv.name .. " to load in"
         return
     end
     if LP.AccountAge < M.TradeConfig.MIN_ACCOUNT_AGE or D.Rolls() < M.TradeConfig.MIN_ROLLS then
@@ -2122,7 +2162,7 @@ function UI.buildRun(page)
 
     -- settings
     local set = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 2, Parent = page })
-    local waitRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(0.5, -5, 1, 0), Parent = set },
+    local waitRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(0.28, -5, 1, 0), Parent = set },
         { UI.corner(8), UI.stroke() })
     UI.label("Wait in server", 12, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -130, 1, 0), Parent = waitRow })
     el.waitBox = UI.new("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
@@ -2136,12 +2176,32 @@ function UI.buildRun(page)
         end
         el.waitBox.Text = tostring(S.plan.wait) .. "s"
     end))
+    local batchRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Position = UDim2.new(0.28, 5, 0, 0),
+        Size = UDim2.new(0.27, -10, 1, 0), Parent = set }, { UI.corner(8), UI.stroke() })
+    UI.label("At once", 12, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -110, 1, 0), Parent = batchRow })
+    local function batchBtn(text, x, delta)
+        local b = UI.new("TextButton", { AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, x, 0.5, 0), Size = UDim2.fromOffset(24, 24), BackgroundColor3 = TH.Accent,
+            Text = text, TextSize = 14, Font = TH.Bold, TextColor3 = TH.Text, Parent = batchRow }, { UI.corner() })
+        UI.press(b)
+        UI.track(b.Activated:Connect(function()
+            S.plan.batch = math.clamp((tonumber(S.plan.batch) or 4) + delta, 1, 8)
+            FS.savePlan()
+            el.batchLabel.Text = tostring(S.plan.batch)
+        end))
+    end
+    batchBtn("+", -8, 1)
+    el.batchLabel = UI.label(tostring(S.plan.batch), 13, TH.Text, TH.Bold, { AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -36, 0.5, 0), Size = UDim2.fromOffset(24, 24), TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = batchRow })
+    batchBtn("–", -64, -1)
     local followHolder = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.5, -5, 1, 0), Parent = set })
-    el.followToggle = UI.toggle(followHolder, "Senders join receiver's server", function()
+        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.45, -5, 1, 0), Parent = set })
+    el.followToggle = UI.toggle(followHolder, "Senders warp to receiver (queue)", function()
         return S.plan.follow
     end, function(v)
         S.plan.follow = v
+        S.plan.followPicked = true
         FS.savePlan()
     end)
 
@@ -2294,6 +2354,9 @@ function UI.frame(dt)
                 el.followToggle.paint()
                 if el.mgrSeg then
                     el.mgrSeg.paint()
+                end
+                if el.batchLabel then
+                    el.batchLabel.Text = tostring(S.plan.batch)
                 end
                 if S.plan.receiver then
                     el.recvBox.Text = S.plan.receiver.name
