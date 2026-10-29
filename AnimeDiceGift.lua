@@ -185,9 +185,15 @@ end
 function H.groups()
     local byName = {}
     local list = {}
+    local plotted = {}
+    for _, slot in pairs(D.Slots() or {}) do
+        if type(slot) == "table" and slot.unitId then
+            plotted[slot.unitId] = true
+        end
+    end
     for key, e in pairs(D.Inventory() or {}) do
         local cfg = M.Entry.getEntryConfig(e.name)
-        if cfg and (e.amount or 0) > 0 then
+        if cfg and (e.amount or 0) > 0 and not plotted[key] then
             local g = byName[e.name]
             if not g then
                 g = { name = e.name, cfg = cfg, kind = cfg.kind, total = 0, keys = {},
@@ -1059,6 +1065,13 @@ function UI.select(name)
 end
 
 -- ── window ──────────────────────────────────────────────────
+function UI.fitScale()
+    local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+    local byH = (vp.Y * 0.82) / 580
+    local byW = (vp.X * 0.9) / 880
+    return math.clamp(math.min(byH, byW), 0.55, 1.15)
+end
+
 function UI.build()
     local parent
     local okH, h = pcall(function()
@@ -1076,7 +1089,7 @@ function UI.build()
     local el = UI.el
 
     el.win = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(700, 470), BackgroundColor3 = TH.Bg, Parent = gui },
+        Size = UDim2.fromOffset(880, 580), BackgroundColor3 = TH.Bg, Parent = gui },
         { UI.corner(14), UI.new("UIScale", { Scale = 0.9 }) })
     el.scale = el.win:FindFirstChildOfClass("UIScale")
     el.border = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Parent = el.win })
@@ -1144,7 +1157,13 @@ function UI.build()
         Size = UDim2.new(1, 0, 0, 1), Parent = el.win })
 
     -- sidebar
-    el.sidebar = UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0,
+    -- sidebar keeps the window's rounded bottom-left corner: rounded frame + square fillers
+    local sideBg = UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, 47), Size = UDim2.new(0, 150, 1, -47), Parent = el.win }, { UI.corner(14) })
+    UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 16), Parent = sideBg })
+    UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0, AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 16, 1, 0), Parent = sideBg })
+    el.sidebar = UI.new("Frame", { BackgroundTransparency = 1, BorderSizePixel = 0,
         Position = UDim2.fromOffset(0, 47), Size = UDim2.new(0, 150, 1, -47), Parent = el.win },
         { UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
           UI.new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }) })
@@ -1168,11 +1187,14 @@ function UI.build()
     UI.buildItems(UI.page("Items", 3))
     UI.buildRun(UI.page("Run", 4))
     -- spacer pushes the status block down
-    UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 180), LayoutOrder = 50, Parent = el.sidebar })
+    UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 290), LayoutOrder = 50, Parent = el.sidebar })
 
     el.win.BackgroundTransparency = 1
     UI.tween(el.win, MOTION.Slow, { BackgroundTransparency = 0 })
-    UI.tween(el.scale, MOTION.Spring, { Scale = 1 })
+    UI.tween(el.scale, MOTION.Spring, { Scale = UI.fitScale() })
+    UI.track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+        UI.tween(el.scale, MOTION.Base, { Scale = UI.fitScale() })
+    end))
     task.defer(function()
         UI.select(S.plan.receiver and "Run" or "Receiver")
     end)
@@ -1337,7 +1359,8 @@ function UI.buildSenders(page)
     UI.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
     UI.section(page, "Sender accounts", 1)
     local row = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 2, Parent = page })
-    el.sendBox = UI.input(row, "sender username (or several, separated by space/comma)…", { Size = UDim2.new(1, -200, 1, 0) })
+    el.sendBox = UI.input(row, "Add usernames (space or comma between)…", { Size = UDim2.new(1, -200, 1, 0),
+        ClipsDescendants = true, TextTruncate = Enum.TextTruncate.AtEnd })
     UI.button(row, "Add", TH.Accent, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 0),
         Size = UDim2.new(0, 90, 1, 0) }, function()
         UI.addSenders(el.sendBox.Text)
@@ -1468,28 +1491,67 @@ function UI.updateSenderRows()
 end
 
 -- ── Items page ──────────────────────────────────────────────
+-- segmented control with a sliding highlight
+function UI.segmented(parent, options, getValue, onPick, props)
+    local seg = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.fromOffset(#options * 70 + 6, 36),
+        Parent = parent }, { UI.corner(10), UI.stroke() })
+    for k, v in pairs(props or {}) do
+        seg[k] = v
+    end
+    local hi = UI.new("Frame", { BackgroundColor3 = TH.Accent, Position = UDim2.fromOffset(3, 3),
+        Size = UDim2.fromOffset(70, 30), Parent = seg }, { UI.corner(8) })
+    local labels = {}
+    for i, opt in ipairs(options) do
+        local b = UI.new("TextButton", { AutoButtonColor = false, BackgroundTransparency = 1, Text = opt,
+            TextSize = 12, Font = TH.Bold, TextColor3 = TH.Sub, Position = UDim2.fromOffset(3 + (i - 1) * 70, 3),
+            Size = UDim2.fromOffset(70, 30), ZIndex = 2, Parent = seg })
+        labels[opt] = { button = b, index = i }
+        UI.track(b.Activated:Connect(function()
+            onPick(opt)
+        end))
+    end
+    local api = {}
+    function api.paint()
+        local cur = getValue()
+        for opt, l in pairs(labels) do
+            local on = opt == cur
+            UI.tween(l.button, MOTION.Base, { TextColor3 = on and TH.Text or TH.Sub })
+            if on then
+                UI.tween(hi, MOTION.Spring, { Position = UDim2.fromOffset(3 + (l.index - 1) * 70, 3) })
+            end
+        end
+    end
+    api.paint()
+    return api
+end
+
 function UI.buildItems(page)
     local el = UI.el
-    local top = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34), Parent = page })
-    el.search = UI.input(top, "search…", { Size = UDim2.new(0, 170, 1, 0) })
+    -- toolbar: search · segmented filter · "send everything" switch
+    local top = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36), Parent = page })
+    el.search = UI.input(top, "Search items…", { Size = UDim2.new(1, -440, 1, 0) })
     UI.track(el.search:GetPropertyChangedSignal("Text"):Connect(function()
         UI.search = H.lower(el.search.Text)
         UI.gridDirty = true
     end))
-    el.filters = {}
-    for i, f in ipairs({ "All", "Units", "Items" }) do
-        local b = UI.button(top, f, TH.Elevated, { Position = UDim2.fromOffset(176 + (i - 1) * 66, 0),
-            Size = UDim2.fromOffset(60, 34) }, function()
-            UI.filter = f
-            UI.gridDirty = true
-            UI.paintFilters()
-        end)
-        el.filters[f] = b
-    end
+    el.seg = UI.segmented(top, { "All", "Units", "Items" }, function()
+        return UI.filter
+    end, function(v)
+        UI.filter = v
+        UI.gridDirty = true
+        el.seg.paint()
+    end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -206, 0, 0) })
+
     el.allToggle = UI.new("TextButton", { AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.fromScale(1, 0), Size = UDim2.fromOffset(150, 34), BackgroundColor3 = TH.Elevated,
-        Text = "Send everything", TextSize = 12, Font = TH.Bold, TextColor3 = TH.Sub, Parent = top }, { UI.corner(8) })
+        Position = UDim2.fromScale(1, 0), Size = UDim2.fromOffset(196, 36), BackgroundColor3 = TH.Panel,
+        Text = "", Parent = top }, { UI.corner(10), UI.stroke() })
     UI.press(el.allToggle)
+    el.allLabel = UI.label("Send everything", 12, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -70, 1, 0), Parent = el.allToggle })
+    el.allTrack = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
+        Size = UDim2.fromOffset(38, 20), BackgroundColor3 = TH.Elevated, Parent = el.allToggle }, { UI.corner() })
+    el.allKnob = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
+        Size = UDim2.fromOffset(14, 14), BackgroundColor3 = TH.Sub, Parent = el.allTrack }, { UI.corner() })
     UI.track(el.allToggle.Activated:Connect(function()
         S.plan.all = not S.plan.all
         FS.savePlan()
@@ -1498,101 +1560,139 @@ function UI.buildItems(page)
         UI.toast(S.plan.all and "Sending EVERY tradeable item" or "Sending only ticked items", S.plan.all and "Bad" or "Good")
     end))
 
-    el.grid = UI.scroller(page, { Position = UDim2.fromOffset(0, 44), Size = UDim2.new(1, 0, 1, -84) })
-    UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(100, 132), CellPadding = UDim2.fromOffset(8, 8),
+    el.grid = UI.scroller(page, { Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 1, -100) })
+    UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(122, 168), CellPadding = UDim2.fromOffset(10, 10),
         SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.grid })
-    UI.new("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingLeft = UDim.new(0, 2), Parent = el.grid })
+    UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8),
+        Parent = el.grid })
+    el.gridEmpty = UI.label("Nothing here - units placed on your plot are hidden", 13, TH.Dim, TH.Font, {
+        Position = UDim2.fromOffset(0, 90), Size = UDim2.new(1, 0, 0, 20), TextXAlignment = Enum.TextXAlignment.Center,
+        Visible = false, Parent = page })
 
+    -- footer: summary pill + actions
     local foot = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0, 1),
-        Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 32), Parent = page })
-    el.itemSummary = UI.label("", 12, TH.Sub, TH.Bold, { Size = UDim2.new(1, -230, 1, 0), Parent = foot })
-    UI.button(foot, "Clear", TH.Elevated, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -116, 0, 0),
-        Size = UDim2.fromOffset(110, 32) }, function()
+        Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 40), Parent = page })
+    local pill = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, -262, 1, 0), Parent = foot },
+        { UI.corner(10), UI.stroke() })
+    el.sumDot = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0),
+        Size = UDim2.fromOffset(8, 8), BackgroundColor3 = TH.Dim, Parent = pill }, { UI.corner() })
+    el.itemSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(30, 0),
+        Size = UDim2.new(1, -40, 1, 0), Parent = pill })
+    UI.button(foot, "Clear", TH.Panel, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -130, 0, 0),
+        Size = UDim2.fromOffset(122, 40), TextColor3 = TH.Bad }, function()
         S.plan.rules = {}
         FS.savePlan()
         UI.gridDirty = true
+        UI.toast("Selection cleared", "Bad")
     end)
-    UI.button(foot, "Tick all shown", TH.Elevated, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
-        Size = UDim2.fromOffset(110, 32) }, function()
+    UI.button(foot, "Tick all shown", TH.Accent, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
+        Size = UDim2.fromOffset(122, 40) }, function()
+        local n = 0
         for _, t in pairs(UI.tiles) do
             if t.visible and t.group.tradeable then
                 S.plan.rules[t.group.name] = "all"
+                n = n + 1
             end
         end
         FS.savePlan()
         UI.gridDirty = true
+        UI.toast("Ticked " .. n .. " items", "Good")
     end)
-    UI.paintFilters()
     UI.paintAll()
 end
 
 function UI.paintFilters()
-    for f, b in pairs(UI.el.filters) do
-        local on = UI.filter == f
-        UI.tween(b, MOTION.Base, { BackgroundColor3 = on and TH.Accent or TH.Elevated, TextColor3 = on and TH.Text or TH.Sub })
+    if UI.el.seg then
+        UI.el.seg.paint()
     end
 end
 
 function UI.paintAll()
+    local el = UI.el
     local on = S.plan.all
-    UI.tween(UI.el.allToggle, MOTION.Base, { BackgroundColor3 = on and TH.Bad or TH.Elevated, TextColor3 = on and TH.Text or TH.Sub })
-    UI.el.allToggle.Text = on and "✓ Sending everything" or "Send everything"
+    UI.tween(el.allTrack, MOTION.Base, { BackgroundColor3 = on and TH.Bad or TH.Elevated })
+    UI.tween(el.allKnob, MOTION.Spring, { Position = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+        BackgroundColor3 = on and TH.Text or TH.Sub })
+    el.allLabel.Text = on and "Sending EVERYTHING" or "Send everything"
+    UI.tween(el.allLabel, MOTION.Base, { TextColor3 = on and TH.Bad or TH.Sub })
 end
 
--- one tile per item name in this account's inventory
+-- first colour of a rarity gradient, for text accents
+function UI.rarityColor(cfg)
+    local ok, c = pcall(function()
+        return cfg.gradient.Keypoints[math.ceil(#cfg.gradient.Keypoints / 2)].Value
+    end)
+    return ok and c or TH.Sub
+end
+
+-- one tile per item name (units placed on the plot are left out)
 function UI.tileFor(g)
     local t = UI.tiles[g.name]
     if t then
         t.group = g
         return t
     end
-    local f = UI.new("Frame", { BackgroundColor3 = TH.Panel, Parent = UI.el.grid }, { UI.corner(10), UI.new("UIScale", {}) })
+    local f = UI.new("Frame", { BackgroundColor3 = TH.Panel, Parent = UI.el.grid }, { UI.corner(12), UI.new("UIScale", {}) })
     local st = UI.stroke(TH.Stroke)
     st.Parent = f
-    local iconHolder = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 6),
-        Size = UDim2.fromOffset(80, 80), Parent = f })
-    -- placeholder until the game icon arrives: rarity gradient tile
-    local ph = UI.new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), Parent = iconHolder },
-        { UI.corner(8) })
+    -- icon well with a soft rarity glow behind the game's icon
+    local well = UI.new("Frame", { BackgroundColor3 = TH.Bg, Position = UDim2.fromOffset(8, 8),
+        Size = UDim2.new(1, -16, 0, 100), ClipsDescendants = true, Parent = f }, { UI.corner(10) })
+    local glow = UI.new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1),
+        BackgroundTransparency = 0.82, Parent = well }, { UI.corner(10) })
     if g.cfg.gradient then
-        UI.new("UIGradient", { Color = g.cfg.gradient, Rotation = 45, Transparency = NumberSequence.new(0.55), Parent = ph })
+        UI.new("UIGradient", { Color = g.cfg.gradient, Rotation = 90,
+            Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) }),
+            Parent = glow })
     end
-    local initial = UI.label(string.sub(g.name, 1, 2), 22, TH.Text, TH.Bold, { Size = UDim2.fromScale(1, 1),
-        TextXAlignment = Enum.TextXAlignment.Center, Parent = ph })
-    local name = UI.label(g.name, 11, TH.Text, TH.Bold, { Position = UDim2.fromOffset(6, 88), Size = UDim2.new(1, -12, 0, 14),
-        TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
-    local qty = UI.label("", 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(6, 104), Size = UDim2.new(1, -12, 0, 22),
-        TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
-    -- stepper (visible when selected)
-    local stepper = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 104),
-        Size = UDim2.new(1, -12, 0, 22), Visible = false, ZIndex = 6, Parent = f })
-    local minus = UI.new("TextButton", { AutoButtonColor = false, Text = "–", TextSize = 14, Font = TH.Bold,
-        TextColor3 = TH.Text, BackgroundColor3 = TH.Elevated, Size = UDim2.fromOffset(22, 22), ZIndex = 7, Parent = stepper },
-        { UI.corner(6) })
-    local amount = UI.new("TextBox", { Text = "All", TextSize = 11, Font = TH.Bold, TextColor3 = TH.Text,
-        BackgroundColor3 = TH.Bg, Position = UDim2.fromOffset(25, 0), Size = UDim2.new(1, -50, 1, 0), ClearTextOnFocus = true,
-        ZIndex = 7, Parent = stepper }, { UI.corner(6) })
-    local plus = UI.new("TextButton", { AutoButtonColor = false, Text = "+", TextSize = 14, Font = TH.Bold,
-        TextColor3 = TH.Text, BackgroundColor3 = TH.Elevated, AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
-        Size = UDim2.fromOffset(22, 22), ZIndex = 7, Parent = stepper }, { UI.corner(6) })
-    UI.press(minus)
-    UI.press(plus)
-    local check = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -6, 0, 6),
+    local holder = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(92, 92), Parent = well })
+    UI.label(string.upper(string.sub(g.name, 1, 2)), 24, TH.Text, TH.Bold, { Size = UDim2.fromScale(1, 1),
+        TextXAlignment = Enum.TextXAlignment.Center, Name = "Placeholder", Parent = holder })
+    -- amount badge (top-left)
+    local badge = UI.new("TextLabel", { BackgroundColor3 = TH.Bg, BackgroundTransparency = 0.15,
+        Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X,
+        Text = "", TextSize = 11, Font = TH.Bold, TextColor3 = TH.Text, ZIndex = 4, Parent = well },
+        { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7) }) })
+    local badgeStroke = UI.stroke(UI.rarityColor(g.cfg), 0.3)
+    badgeStroke.Parent = badge
+    -- selection tint + check
+    local tint = UI.new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = TH.Accent, BackgroundTransparency = 1,
+        ZIndex = 3, Parent = well }, { UI.corner(10) })
+    local check = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -6, 1, -6),
         Size = UDim2.fromOffset(22, 22), BackgroundColor3 = TH.Accent, Text = "✓", TextSize = 13, Font = TH.Bold,
-        TextColor3 = TH.Text, ZIndex = 8, Visible = false, Parent = f }, { UI.corner(), UI.new("UIScale", {}) })
-    local hit = UI.new("TextButton", { BackgroundTransparency = 1, Text = "", Size = UDim2.new(1, 0, 0, 102), ZIndex = 5, Parent = f })
-    local lock = UI.label("can't trade", 10, TH.Bad, TH.Bold, { Position = UDim2.fromOffset(0, 70), Size = UDim2.new(1, 0, 0, 14),
-        TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 9, Visible = false, Parent = f })
-    t = { frame = f, stroke = st, holder = iconHolder, placeholder = ph, initial = initial, name = name, qty = qty,
-        stepper = stepper, amount = amount, check = check, lock = lock, group = g, iconState = "none", visible = true }
+        TextColor3 = TH.Text, ZIndex = 5, Visible = false, Parent = well }, { UI.corner(), UI.new("UIScale", {}) })
+    -- name + sub line
+    local name = UI.label(g.name, 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(8, 113),
+        Size = UDim2.new(1, -16, 0, 15), TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
+    local sub = UI.label("", 11, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(8, 130),
+        Size = UDim2.new(1, -16, 0, 28), TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
+    -- stepper pill (visible when selected): − value +
+    local stepper = UI.new("Frame", { BackgroundColor3 = TH.Bg, Position = UDim2.fromOffset(8, 132),
+        Size = UDim2.new(1, -16, 0, 28), Visible = false, ZIndex = 6, Parent = f }, { UI.corner() })
+    local stStroke = UI.stroke(TH.Accent, 0.4)
+    stStroke.Parent = stepper
+    local function round(text, x)
+        local b = UI.new("TextButton", { AutoButtonColor = false, Text = text, TextSize = 15, Font = TH.Bold,
+            TextColor3 = TH.Text, BackgroundColor3 = TH.Accent, AnchorPoint = Vector2.new(x, 0.5),
+            Position = UDim2.new(x, x == 0 and 3 or -3, 0.5, 0), Size = UDim2.fromOffset(22, 22), ZIndex = 7,
+            Parent = stepper }, { UI.corner() })
+        UI.press(b)
+        return b
+    end
+    local minus = round("–", 0)
+    local plus = round("+", 1)
+    local amount = UI.new("TextBox", { BackgroundTransparency = 1, Text = "ALL", TextSize = 12, Font = TH.Bold,
+        TextColor3 = TH.Text, Position = UDim2.fromOffset(27, 0), Size = UDim2.new(1, -54, 1, 0),
+        ClearTextOnFocus = true, ZIndex = 7, Parent = stepper })
+    local hit = UI.new("TextButton", { BackgroundTransparency = 1, Text = "", Size = UDim2.new(1, 0, 0, 128),
+        ZIndex = 8, Parent = f })
+    t = { frame = f, stroke = st, well = well, holder = holder, tint = tint, badge = badge, name = name, sub = sub,
+        stepper = stepper, amount = amount, check = check, group = g, visible = true, glow = glow }
     UI.tiles[g.name] = t
 
     local function setRule(v)
-        if v == nil then
-            S.plan.rules[t.group.name] = nil
-        else
-            S.plan.rules[t.group.name] = v
-        end
+        S.plan.rules[t.group.name] = v
         FS.savePlan()
         UI.paintTile(t, true)
     end
@@ -1601,27 +1701,30 @@ function UI.tileFor(g)
             UI.toast(t.group.name .. " can't be traded", "Bad")
             return
         end
+        if S.plan.all then
+            UI.toast("turn off Send everything to pick items", "Bad")
+            return
+        end
         if S.plan.rules[t.group.name] then
             setRule(nil)
         else
             setRule("all")
         end
     end))
+    local sc = f:FindFirstChildOfClass("UIScale")
     UI.track(hit.MouseEnter:Connect(function()
-        UI.tween(f, MOTION.Fast, { BackgroundColor3 = TH.Hover })
+        UI.tween(sc, MOTION.Fast, { Scale = 1.03 })
+        UI.tween(glow, MOTION.Fast, { BackgroundTransparency = 0.7 })
     end))
     UI.track(hit.MouseLeave:Connect(function()
-        UI.tween(f, MOTION.Fast, { BackgroundColor3 = TH.Panel })
+        UI.tween(sc, MOTION.Base, { Scale = 1 })
+        UI.tween(glow, MOTION.Base, { BackgroundTransparency = 0.82 })
     end))
     UI.track(minus.Activated:Connect(function()
         local cur = S.plan.rules[t.group.name]
         local n = (cur == "all") and t.group.total or (tonumber(cur) or 1)
         n = n - 1
-        if n <= 0 then
-            setRule(nil)
-        else
-            setRule(n)
-        end
+        setRule(n > 0 and n or nil)
     end))
     UI.track(plus.Activated:Connect(function()
         local cur = S.plan.rules[t.group.name]
@@ -1629,19 +1732,19 @@ function UI.tileFor(g)
             return
         end
         local n = (tonumber(cur) or 0) + 1
-        if n >= t.group.total then
-            setRule("all")
-        else
-            setRule(n)
-        end
+        setRule(n >= t.group.total and "all" or n)
     end))
     UI.track(amount.FocusLost:Connect(function()
         local txt = H.lower(amount.Text)
-        if txt == "" or txt == "all" or txt == "a" then
+        if txt == "" or txt == "all" or txt == "a" or txt == "max" then
             setRule("all")
             return
         end
-        local n = tonumber(txt) or (M.NF.ParseCompact and M.NF.ParseCompact(txt))
+        local n = tonumber(txt)
+        if not n then
+            local ok, v = pcall(M.NF.ParseCompact, txt)
+            n = ok and v or nil
+        end
         if not n or n <= 0 then
             setRule(nil)
         else
@@ -1649,13 +1752,9 @@ function UI.tileFor(g)
             setRule(n >= t.group.total and "all" or n)
         end
     end))
-    -- ask the worker for the game's own icon
     if M.EntryIcon then
-        t.iconState = "pending"
-        ICON.request(g.name, g.keys[1] and g.keys[1].key, iconHolder)
+        ICON.request(g.name, g.keys[1] and g.keys[1].key, holder)
     end
-    -- pop in
-    local sc = f:FindFirstChildOfClass("UIScale")
     sc.Scale = 0.85
     UI.tween(sc, MOTION.Spring, { Scale = 1 })
     return t
@@ -1665,23 +1764,31 @@ function UI.paintTile(t, animate)
     local g = t.group
     local rule = S.plan.all and (g.tradeable and "all" or nil) or S.plan.rules[g.name]
     local on = rule ~= nil
-    t.lock.Visible = false
-    t.frame.BackgroundTransparency = g.tradeable and 0 or 0.4
-    t.qty.Visible = not on
-    t.stepper.Visible = on and not S.plan.all
-    if g.tradeable then
-        t.qty.Text = (g.kind == "Unit" and "units " or "x") .. H.fmt(g.total)
-        t.qty.TextColor3 = TH.Sub
+    -- amount badge + sub line
+    if g.kind == "Unit" then
+        t.badge.Text = "×" .. H.fmt(g.total)
+        local best = g.keys[1] and g.keys[1].income or 0
+        t.sub.Text = "$" .. H.fmt(best) .. "/s"
+        t.sub.TextColor3 = TH.Good
     else
-        t.qty.Text = "can't trade"
-        t.qty.TextColor3 = TH.Bad
+        t.badge.Text = "x" .. H.fmt(g.total)
+        t.sub.Text = tostring(g.cfg.rarity or g.kind)
+        t.sub.TextColor3 = UI.rarityColor(g.cfg)
     end
+    if not g.tradeable then
+        t.sub.Text = "can't trade"
+        t.sub.TextColor3 = TH.Bad
+    end
+    t.frame.BackgroundTransparency = g.tradeable and 0 or 0.45
+    t.sub.Visible = not (on and not S.plan.all)
+    t.stepper.Visible = on and not S.plan.all
     if on and not S.plan.all and not t.amount:IsFocused() then
-        t.amount.Text = (rule == "all") and ("All " .. H.fmt(g.total)) or (tostring(rule) .. "/" .. H.fmt(g.total))
+        t.amount.Text = (rule == "all") and ("ALL · " .. H.fmt(g.total)) or (H.fmt(tonumber(rule) or 0) .. " / " .. H.fmt(g.total))
     end
     local wasOn = t.check.Visible
     t.check.Visible = on
-    t.stroke.Color = on and TH.Accent or TH.Stroke
+    UI.tween(t.tint, MOTION.Base, { BackgroundTransparency = on and 0.86 or 1 })
+    UI.tween(t.stroke, MOTION.Base, { Color = on and TH.Accent or TH.Stroke })
     t.stroke.Thickness = on and 2 or 1
     if animate and on and not wasOn then
         local sc = t.check:FindFirstChildOfClass("UIScale")
@@ -1697,7 +1804,7 @@ function UI.renderGrid()
     UI.gridDirty = false
     local groups = H.groups()
     local seen = {}
-    local selItems, selCount = 0, 0
+    local selItems, selCount, shown = 0, 0, 0
     for i, g in ipairs(groups) do
         seen[g.name] = true
         local t = UI.tileFor(g)
@@ -1707,6 +1814,9 @@ function UI.renderGrid()
         t.visible = passFilter and passSearch
         t.frame.Visible = t.visible
         t.frame.LayoutOrder = i
+        if t.visible then
+            shown = shown + 1
+        end
         UI.paintTile(t, false)
         local rule = S.plan.all and (g.tradeable and "all" or nil) or S.plan.rules[g.name]
         if rule then
@@ -1720,18 +1830,20 @@ function UI.renderGrid()
             t.frame:Destroy()
         end
     end
-    -- rules for items this account doesn't own still go to the other senders
+    UI.el.gridEmpty.Visible = shown == 0
     local other = 0
     for name in pairs(S.plan.rules) do
         if not seen[name] then
             other = other + 1
         end
     end
-    UI.el.itemSummary.Text = (S.plan.all and "EVERYTHING tradeable · " or "") .. selItems .. " picked here · "
-        .. H.fmt(selCount) .. " pcs" .. (other > 0 and (" · +" .. other .. " picked on other screens") or "")
+    UI.el.itemSummary.Text = (S.plan.all and "EVERYTHING tradeable  ·  " or "") .. selItems .. " picked  ·  "
+        .. H.fmt(selCount) .. " pcs" .. (other > 0 and ("  ·  +" .. other .. " from other screens") or "")
+    UI.el.sumDot.BackgroundColor3 = (selItems > 0 or S.plan.all) and (S.plan.all and TH.Bad or TH.Good) or TH.Dim
 end
 
--- deliver finished game icons (built on the worker) into their tiles
+-- deliver finished game icons into their tiles; the game's own text labels (count / income
+-- boxes) and the "equipped" tick are hidden - the tile draws its own badge instead
 function UI.deliverIcons()
     while #ICON.done > 0 do
         local d = table.remove(ICON.done, 1)
@@ -1739,16 +1851,22 @@ function UI.deliverIcons()
         if holder and holder.Parent then
             if d.icon then
                 local ok = pcall(function()
+                    for _, desc in ipairs(d.icon:GetDescendants()) do
+                        if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                            desc.Visible = false
+                        elseif desc.Name == "Equipped" and desc:IsA("GuiObject") then
+                            desc.Visible = false
+                        end
+                    end
                     d.icon.AnchorPoint = Vector2.new(0.5, 0.5)
                     d.icon.Position = UDim2.fromScale(0.5, 0.5)
                     d.icon.Size = UDim2.fromScale(1, 1)
                     d.icon.Parent = holder
                 end)
                 if ok then
-                    for _, c in ipairs(holder:GetChildren()) do
-                        if c ~= d.icon then
-                            c:Destroy()
-                        end
+                    local ph = holder:FindFirstChild("Placeholder")
+                    if ph then
+                        ph:Destroy()
                     end
                 end
             elseif d.err and not UI.iconErrLogged then
@@ -1830,7 +1948,7 @@ function UI.buildRun(page)
 
     -- progress list
     UI.section(page, "Progress", 3)
-    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 120), LayoutOrder = 4 })
+    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 200), LayoutOrder = 4 })
     UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.progress })
     el.progRows = {}
 
