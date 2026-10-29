@@ -1358,51 +1358,144 @@ function UI.buildSenders(page)
     local el = UI.el
     UI.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
     UI.section(page, "Sender accounts", 1)
-    local row = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 2, Parent = page })
-    el.sendBox = UI.input(row, "Add usernames (space or comma between)…", { Size = UDim2.new(1, -200, 1, 0),
-        ClipsDescendants = true, TextTruncate = Enum.TextTruncate.AtEnd })
-    UI.button(row, "Add", TH.Accent, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 0),
-        Size = UDim2.new(0, 90, 1, 0) }, function()
-        UI.addSenders(el.sendBox.Text)
+    -- paste box: one name, or a whole list (new lines, spaces or commas between)
+    local row = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 82), LayoutOrder = 2, Parent = page })
+    el.sendBox = UI.input(row, "Paste usernames - one per line, or separated by space / comma (50 at once is fine)",
+        { Size = UDim2.new(1, -150, 1, 0), MultiLine = true, TextWrapped = true, ClipsDescendants = true,
+          TextYAlignment = Enum.TextYAlignment.Top, TextSize = 12 })
+    el.sendBox:FindFirstChildOfClass("UIPadding").PaddingTop = UDim.new(0, 10)
+    el.sendBox:FindFirstChildOfClass("UIPadding").PaddingBottom = UDim.new(0, 10)
+    el.addBtn = UI.button(row, "Add", TH.Accent, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
+        Size = UDim2.new(0, 140, 0, 38) }, function()
+        local text = el.sendBox.Text
         el.sendBox.Text = ""
+        UI.addSenders(text)
     end)
-    UI.button(row, "Add me", TH.Elevated, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
-        Size = UDim2.new(0, 90, 1, 0) }, function()
+    UI.button(row, "Add me", TH.Elevated, { AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1),
+        Size = UDim2.new(0, 140, 0, 38) }, function()
         UI.addSenders(LP.Name)
     end)
-    UI.track(el.sendBox.FocusLost:Connect(function(enter)
-        if enter and el.sendBox.Text ~= "" then
-            UI.addSenders(el.sendBox.Text)
-            el.sendBox.Text = ""
+    -- progress bar for bulk adds
+    el.addTrack = UI.new("Frame", { BackgroundColor3 = TH.Elevated, Size = UDim2.new(1, 0, 0, 4), LayoutOrder = 3,
+        Visible = false, Parent = page }, { UI.corner() })
+    el.addFill = UI.new("Frame", { BackgroundColor3 = TH.Accent, Size = UDim2.fromScale(0, 1), Parent = el.addTrack }, { UI.corner() })
+    local countRow = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 22), LayoutOrder = 4, Parent = page })
+    el.sendCount = UI.label("0 senders", 11, TH.Dim, TH.Bold, { Size = UDim2.new(1, -120, 1, 0), Parent = countRow })
+    UI.button(countRow, "Clear list", TH.Panel, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
+        Size = UDim2.fromOffset(110, 22), TextColor3 = TH.Bad, TextSize = 11 }, function()
+        if #S.plan.senders == 0 then
+            return
         end
-    end))
-    el.sendCount = UI.label("0 senders", 11, TH.Dim, TH.Bold, { Size = UDim2.new(1, 0, 0, 14), LayoutOrder = 3, Parent = page })
-    el.sendList = UI.scroller(page, { Size = UDim2.new(1, 0, 1, -110), LayoutOrder = 4 })
+        if UI.confirmClear and os.clock() - UI.confirmClear < 3 then
+            UI.confirmClear = nil
+            S.plan.senders = {}
+            FS.savePlan()
+            UI.renderSenders()
+            UI.toast("Sender list cleared", "Bad")
+        else
+            UI.confirmClear = os.clock()
+            UI.toast("Press Clear list again to remove all " .. #S.plan.senders, "Bad")
+        end
+    end)
+    el.sendList = UI.scroller(page, { Size = UDim2.new(1, 0, 1, -168), LayoutOrder = 5 })
     UI.new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.sendList })
 end
 
+-- checks every name against Roblox one after another (with a progress bar) and saves once
 function UI.addSenders(text)
+    if UI.adding then
+        UI.toast("still adding the previous list…", "Bad")
+        return
+    end
+    local names, seen = {}, {}
     for name in string.gmatch(text or "", "[%w_]+") do
-        if H.isSender(name) then
-            UI.toast(name .. " is already in the list", "Bad")
-        elseif S.plan.receiver and H.lower(S.plan.receiver.name) == H.lower(name) then
-            UI.toast(name .. " is the receiver", "Bad")
-        else
-            UI.lookup(name, function(info)
-                if not info then
-                    UI.toast("@" .. name .. " not found", "Bad")
-                    return
-                end
-                if H.isSender(info.name) then
-                    return
-                end
-                table.insert(S.plan.senders, { name = info.name, userId = info.userId, display = info.display })
-                FS.savePlan()
-                UI.toast("added " .. info.name, "Good")
-                UI.renderSenders()
-            end)
+        local key = H.lower(name)
+        if not seen[key] then
+            seen[key] = true
+            table.insert(names, name)
         end
     end
+    if #names == 0 then
+        UI.toast("type or paste usernames first", "Bad")
+        return
+    end
+    UI.adding = true
+    local el = UI.el
+    task.spawn(function()
+        local added, skipped, missing = {}, 0, {}
+        el.addTrack.Visible = true
+        el.addFill.Size = UDim2.fromScale(0, 1)
+        for i, name in ipairs(names) do
+            el.sendCount.Text = "checking " .. i .. " / " .. #names .. " · @" .. name
+            UI.tween(el.addFill, MOTION.Base, { Size = UDim2.fromScale(i / #names, 1) })
+            local isRecv = S.plan.receiver and H.lower(S.plan.receiver.name) == H.lower(name)
+            if H.isSender(name) or isRecv then
+                skipped = skipped + 1
+            else
+                local id = nil
+                for attempt = 1, 3 do
+                    local ok, res = pcall(Players.GetUserIdFromNameAsync, Players, name)
+                    if ok and res then
+                        id = res
+                        break
+                    end
+                    -- a real "not found" fails the same way, so only retry briefly (rate limits)
+                    task.wait(0.4 * attempt)
+                end
+                if id then
+                    table.insert(added, { name = name, userId = id, display = name })
+                    table.insert(S.plan.senders, added[#added])
+                    if #added % 10 == 0 then
+                        UI.renderSenders()
+                    end
+                else
+                    table.insert(missing, name)
+                end
+            end
+            task.wait(0.05)
+        end
+        -- exact usernames + display names in one request
+        if #added > 0 then
+            local ids = {}
+            for _, a in ipairs(added) do
+                table.insert(ids, a.userId)
+            end
+            local ok, infos = pcall(function()
+                return game:GetService("UserService"):GetUserInfosByUserIdsAsync(ids)
+            end)
+            if ok and type(infos) == "table" then
+                local byId = {}
+                for _, inf in ipairs(infos) do
+                    byId[inf.Id] = inf
+                end
+                for _, a in ipairs(added) do
+                    local inf = byId[a.userId]
+                    if inf then
+                        a.name = inf.Username or a.name
+                        a.display = inf.DisplayName or a.name
+                    end
+                end
+            end
+        end
+        FS.savePlan()
+        UI.renderSenders()
+        UI.tween(el.addFill, MOTION.Base, { Size = UDim2.fromScale(1, 1) })
+        task.wait(0.4)
+        el.addTrack.Visible = false
+        UI.adding = false
+        local msg = "added " .. #added
+        if skipped > 0 then
+            msg = msg .. " · " .. skipped .. " already in"
+        end
+        if #missing > 0 then
+            msg = msg .. " · " .. #missing .. " not found"
+            log("not found: " .. table.concat(missing, ", "), "Bad")
+            -- keep the bad names in the box so they can be fixed
+            el.sendBox.Text = table.concat(missing, "\n")
+        end
+        UI.toast(msg, #missing > 0 and "Bad" or "Good")
+        log("senders: " .. msg)
+    end)
 end
 
 function UI.renderSenders()
