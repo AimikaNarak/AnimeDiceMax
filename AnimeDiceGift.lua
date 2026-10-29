@@ -1730,33 +1730,36 @@ function UI.updateSenderRows()
 end
 
 -- ── Items page ──────────────────────────────────────────────
+-- Shows EVERY entry the game has (all units incl. Huge/Titanic, potions, gear, spins, …),
+-- not only what this screen owns. Rules are per name, so each sender sends what it has.
 -- segmented control with a sliding highlight
-function UI.segmented(parent, options, getValue, onPick, props)
-    local seg = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.fromOffset(#options * 70 + 6, 36),
+function UI.segmented(parent, options, getValue, onPick, props, width)
+    local w = width or 70
+    local seg = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.fromOffset(#options * w + 6, 36),
         Parent = parent }, { UI.corner(10), UI.stroke() })
     for k, v in pairs(props or {}) do
         seg[k] = v
     end
     local hi = UI.new("Frame", { BackgroundColor3 = TH.Accent, Position = UDim2.fromOffset(3, 3),
-        Size = UDim2.fromOffset(70, 30), Parent = seg }, { UI.corner(8) })
+        Size = UDim2.fromOffset(w, 30), Parent = seg }, { UI.corner(8) })
     local labels = {}
     for i, opt in ipairs(options) do
         local b = UI.new("TextButton", { AutoButtonColor = false, BackgroundTransparency = 1, Text = opt,
-            TextSize = 12, Font = TH.Bold, TextColor3 = TH.Sub, Position = UDim2.fromOffset(3 + (i - 1) * 70, 3),
-            Size = UDim2.fromOffset(70, 30), ZIndex = 2, Parent = seg })
+            TextSize = 12, Font = TH.Bold, TextColor3 = TH.Sub, Position = UDim2.fromOffset(3 + (i - 1) * w, 3),
+            Size = UDim2.fromOffset(w, 30), ZIndex = 2, Parent = seg })
         labels[opt] = { button = b, index = i }
         UI.track(b.Activated:Connect(function()
             onPick(opt)
         end))
     end
-    local api = {}
+    local api = { frame = seg }
     function api.paint()
         local cur = getValue()
         for opt, l in pairs(labels) do
             local on = opt == cur
             UI.tween(l.button, MOTION.Base, { TextColor3 = on and TH.Text or TH.Sub })
             if on then
-                UI.tween(hi, MOTION.Spring, { Position = UDim2.fromOffset(3 + (l.index - 1) * 70, 3) })
+                UI.tween(hi, MOTION.Spring, { Position = UDim2.fromOffset(3 + (l.index - 1) * w, 3) })
             end
         end
     end
@@ -1764,11 +1767,41 @@ function UI.segmented(parent, options, getValue, onPick, props)
     return api
 end
 
+-- every entry in the game, sorted rarest first (built once)
+function UI.catalogList()
+    if UI.catalog then
+        return UI.catalog
+    end
+    local list = {}
+    local ok, all = pcall(M.Entry.allEntries)
+    for name, cfg in pairs(ok and all or {}) do
+        local r = nil
+        pcall(function()
+            r = M.Rarities.Get(cfg.rarity)
+        end)
+        local tradeable = H.tradeable({ name = name })
+        table.insert(list, { name = name, cfg = cfg, kind = cfg.kind, tradeable = tradeable,
+            sort = (r and r.sortOrder or 0) * 1000 + (cfg.kind == "Unit" and 1 or 0) })
+    end
+    -- tradeable first (rarest on top), things that can't be traded at the very end
+    table.sort(list, function(a, b)
+        if a.tradeable ~= b.tradeable then
+            return a.tradeable == true
+        end
+        if a.sort ~= b.sort then
+            return a.sort > b.sort
+        end
+        return a.name < b.name
+    end)
+    UI.catalog = list
+    return list
+end
+
 function UI.buildItems(page)
     local el = UI.el
-    -- toolbar: search · segmented filter · "send everything" switch
+    -- toolbar: search · kind filter · owned filter
     local top = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36), Parent = page })
-    el.search = UI.input(top, "Search items…", { Size = UDim2.new(1, -440, 1, 0) })
+    el.search = UI.input(top, "Search…", { Size = UDim2.new(1, -470, 1, 0) })
     UI.track(el.search:GetPropertyChangedSignal("Text"):Connect(function()
         UI.search = H.lower(el.search.Text)
         UI.gridDirty = true
@@ -1779,11 +1812,38 @@ function UI.buildItems(page)
         UI.filter = v
         UI.gridDirty = true
         el.seg.paint()
-    end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -206, 0, 0) })
+    end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -244, 0, 0) }, 64)
+    UI.own = UI.own or "None"
+    el.ownSeg = UI.segmented(top, { "None", "Owned", "Not owned" }, function()
+        return UI.own
+    end, function(v)
+        UI.own = v
+        UI.gridDirty = true
+        el.ownSeg.paint()
+    end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0) }, 76)
+
+    el.grid = UI.scroller(page, { Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 1, -100) })
+    UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(122, 168), CellPadding = UDim2.fromOffset(10, 10),
+        SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.grid })
+    UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8),
+        Parent = el.grid })
+    el.gridEmpty = UI.label("Nothing matches the filters", 13, TH.Dim, TH.Font, {
+        Position = UDim2.fromOffset(0, 90), Size = UDim2.new(1, 0, 0, 20), TextXAlignment = Enum.TextXAlignment.Center,
+        Visible = false, Parent = page })
+
+    -- footer: summary pill · send everything switch · clear · tick all
+    local foot = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 40), Parent = page })
+    local pill = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, -456, 1, 0), Parent = foot },
+        { UI.corner(10), UI.stroke() })
+    el.sumDot = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0),
+        Size = UDim2.fromOffset(8, 8), BackgroundColor3 = TH.Dim, Parent = pill }, { UI.corner() })
+    el.itemSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(30, 0),
+        Size = UDim2.new(1, -40, 1, 0), Parent = pill })
 
     el.allToggle = UI.new("TextButton", { AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.fromScale(1, 0), Size = UDim2.fromOffset(196, 36), BackgroundColor3 = TH.Panel,
-        Text = "", Parent = top }, { UI.corner(10), UI.stroke() })
+        Position = UDim2.new(1, -260, 0, 0), Size = UDim2.fromOffset(188, 40), BackgroundColor3 = TH.Panel,
+        Text = "", Parent = foot }, { UI.corner(10), UI.stroke() })
     UI.press(el.allToggle)
     el.allLabel = UI.label("Send everything", 12, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(14, 0),
         Size = UDim2.new(1, -70, 1, 0), Parent = el.allToggle })
@@ -1798,25 +1858,6 @@ function UI.buildItems(page)
         UI.gridDirty = true
         UI.toast(S.plan.all and "Sending EVERY tradeable item" or "Sending only ticked items", S.plan.all and "Bad" or "Good")
     end))
-
-    el.grid = UI.scroller(page, { Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 1, -100) })
-    UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(122, 168), CellPadding = UDim2.fromOffset(10, 10),
-        SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.grid })
-    UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8),
-        Parent = el.grid })
-    el.gridEmpty = UI.label("Nothing here - units placed on your plot are hidden", 13, TH.Dim, TH.Font, {
-        Position = UDim2.fromOffset(0, 90), Size = UDim2.new(1, 0, 0, 20), TextXAlignment = Enum.TextXAlignment.Center,
-        Visible = false, Parent = page })
-
-    -- footer: summary pill + actions
-    local foot = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0, 1),
-        Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 40), Parent = page })
-    local pill = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, -262, 1, 0), Parent = foot },
-        { UI.corner(10), UI.stroke() })
-    el.sumDot = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0),
-        Size = UDim2.fromOffset(8, 8), BackgroundColor3 = TH.Dim, Parent = pill }, { UI.corner() })
-    el.itemSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(30, 0),
-        Size = UDim2.new(1, -40, 1, 0), Parent = pill })
     UI.button(foot, "Clear", TH.Panel, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -130, 0, 0),
         Size = UDim2.fromOffset(122, 40), TextColor3 = TH.Bad }, function()
         S.plan.rules = {}
@@ -1856,7 +1897,6 @@ function UI.paintAll()
     UI.tween(el.allLabel, MOTION.Base, { TextColor3 = on and TH.Bad or TH.Sub })
 end
 
--- first colour of a rarity gradient, for text accents
 function UI.rarityColor(cfg)
     local ok, c = pcall(function()
         return cfg.gradient.Keypoints[math.ceil(#cfg.gradient.Keypoints / 2)].Value
@@ -1864,7 +1904,7 @@ function UI.rarityColor(cfg)
     return ok and c or TH.Sub
 end
 
--- one tile per item name (units placed on the plot are left out)
+-- one tile per entry name; the game icon is requested lazily when the tile scrolls into view
 function UI.tileFor(g)
     local t = UI.tiles[g.name]
     if t then
@@ -1874,7 +1914,6 @@ function UI.tileFor(g)
     local f = UI.new("Frame", { BackgroundColor3 = TH.Panel, Parent = UI.el.grid }, { UI.corner(12), UI.new("UIScale", {}) })
     local st = UI.stroke(TH.Stroke)
     st.Parent = f
-    -- icon well with a soft rarity glow behind the game's icon
     local well = UI.new("Frame", { BackgroundColor3 = TH.Bg, Position = UDim2.fromOffset(8, 8),
         Size = UDim2.new(1, -16, 0, 100), ClipsDescendants = true, Parent = f }, { UI.corner(10) })
     local glow = UI.new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1),
@@ -1888,25 +1927,21 @@ function UI.tileFor(g)
         Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(92, 92), Parent = well })
     UI.label(string.upper(string.sub(g.name, 1, 2)), 24, TH.Text, TH.Bold, { Size = UDim2.fromScale(1, 1),
         TextXAlignment = Enum.TextXAlignment.Center, Name = "Placeholder", Parent = holder })
-    -- amount badge (top-left)
     local badge = UI.new("TextLabel", { BackgroundColor3 = TH.Bg, BackgroundTransparency = 0.15,
         Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X,
         Text = "", TextSize = 11, Font = TH.Bold, TextColor3 = TH.Text, ZIndex = 4, Parent = well },
         { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7) }) })
     local badgeStroke = UI.stroke(UI.rarityColor(g.cfg), 0.3)
     badgeStroke.Parent = badge
-    -- selection tint + check
     local tint = UI.new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = TH.Accent, BackgroundTransparency = 1,
         ZIndex = 3, Parent = well }, { UI.corner(10) })
     local check = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -6, 1, -6),
         Size = UDim2.fromOffset(22, 22), BackgroundColor3 = TH.Accent, Text = "✓", TextSize = 13, Font = TH.Bold,
         TextColor3 = TH.Text, ZIndex = 5, Visible = false, Parent = well }, { UI.corner(), UI.new("UIScale", {}) })
-    -- name + sub line
     local name = UI.label(g.name, 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(8, 113),
         Size = UDim2.new(1, -16, 0, 15), TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
     local sub = UI.label("", 11, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(8, 130),
         Size = UDim2.new(1, -16, 0, 28), TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
-    -- stepper pill (visible when selected): − value +
     local stepper = UI.new("Frame", { BackgroundColor3 = TH.Bg, Position = UDim2.fromOffset(8, 132),
         Size = UDim2.new(1, -16, 0, 28), Visible = false, ZIndex = 6, Parent = f }, { UI.corner() })
     local stStroke = UI.stroke(TH.Accent, 0.4)
@@ -1927,9 +1962,13 @@ function UI.tileFor(g)
     local hit = UI.new("TextButton", { BackgroundTransparency = 1, Text = "", Size = UDim2.new(1, 0, 0, 128),
         ZIndex = 8, Parent = f })
     t = { frame = f, stroke = st, well = well, holder = holder, tint = tint, badge = badge, name = name, sub = sub,
-        stepper = stepper, amount = amount, check = check, group = g, visible = true, glow = glow }
+        stepper = stepper, amount = amount, check = check, group = g, visible = true, glow = glow, iconState = "none" }
     UI.tiles[g.name] = t
 
+    -- owned amount decides the cap; for things this screen doesn't own there is no cap
+    local function cap()
+        return t.group.total > 0 and t.group.total or math.huge
+    end
     local function setRule(v)
         S.plan.rules[t.group.name] = v
         FS.savePlan()
@@ -1944,11 +1983,7 @@ function UI.tileFor(g)
             UI.toast("turn off Send everything to pick items", "Bad")
             return
         end
-        if S.plan.rules[t.group.name] then
-            setRule(nil)
-        else
-            setRule("all")
-        end
+        setRule((not S.plan.rules[t.group.name]) and "all" or nil)
     end))
     local sc = f:FindFirstChildOfClass("UIScale")
     UI.track(hit.MouseEnter:Connect(function()
@@ -1961,8 +1996,12 @@ function UI.tileFor(g)
     end))
     UI.track(minus.Activated:Connect(function()
         local cur = S.plan.rules[t.group.name]
-        local n = (cur == "all") and t.group.total or (tonumber(cur) or 1)
-        n = n - 1
+        local n
+        if cur == "all" then
+            n = (t.group.total > 0) and (t.group.total - 1) or 0
+        else
+            n = (tonumber(cur) or 1) - 1
+        end
         setRule(n > 0 and n or nil)
     end))
     UI.track(plus.Activated:Connect(function()
@@ -1971,7 +2010,7 @@ function UI.tileFor(g)
             return
         end
         local n = (tonumber(cur) or 0) + 1
-        setRule(n >= t.group.total and "all" or n)
+        setRule(n >= cap() and "all" or n)
     end))
     UI.track(amount.FocusLost:Connect(function()
         local txt = H.lower(amount.Text)
@@ -1988,12 +2027,9 @@ function UI.tileFor(g)
             setRule(nil)
         else
             n = math.floor(n)
-            setRule(n >= t.group.total and "all" or n)
+            setRule(n >= cap() and "all" or n)
         end
     end))
-    if M.EntryIcon then
-        ICON.request(g.name, g.keys[1] and g.keys[1].key, holder)
-    end
     sc.Scale = 0.85
     UI.tween(sc, MOTION.Spring, { Scale = 1 })
     return t
@@ -2003,26 +2039,37 @@ function UI.paintTile(t, animate)
     local g = t.group
     local rule = S.plan.all and (g.tradeable and "all" or nil) or S.plan.rules[g.name]
     local on = rule ~= nil
-    -- amount badge + sub line
+    local owned = g.total > 0
     if g.kind == "Unit" then
-        t.badge.Text = "×" .. H.fmt(g.total)
-        local best = g.keys[1] and g.keys[1].income or 0
-        t.sub.Text = "$" .. H.fmt(best) .. "/s"
-        t.sub.TextColor3 = TH.Good
+        t.badge.Text = owned and ("×" .. H.fmt(g.total)) or "×0"
+        local inc = g.keys[1] and g.keys[1].income
+        if not inc then
+            local ok, v = pcall(g.cfg.income, {})
+            inc = ok and v or 0
+        end
+        t.sub.Text = "$" .. H.fmt(inc) .. "/s"
+        t.sub.TextColor3 = owned and TH.Good or TH.Dim
     else
         t.badge.Text = "x" .. H.fmt(g.total)
         t.sub.Text = tostring(g.cfg.rarity or g.kind)
         t.sub.TextColor3 = UI.rarityColor(g.cfg)
     end
+    t.badge.TextColor3 = owned and TH.Text or TH.Dim
     if not g.tradeable then
         t.sub.Text = "can't trade"
         t.sub.TextColor3 = TH.Bad
     end
-    t.frame.BackgroundTransparency = g.tradeable and 0 or 0.45
+    -- not owned here: dimmed, still pickable (other senders may own it)
+    t.frame.BackgroundTransparency = (g.tradeable and owned) and 0 or 0.45
+    t.name.TextColor3 = owned and TH.Text or TH.Sub
     t.sub.Visible = not (on and not S.plan.all)
     t.stepper.Visible = on and not S.plan.all
     if on and not S.plan.all and not t.amount:IsFocused() then
-        t.amount.Text = (rule == "all") and ("ALL · " .. H.fmt(g.total)) or (H.fmt(tonumber(rule) or 0) .. " / " .. H.fmt(g.total))
+        if rule == "all" then
+            t.amount.Text = owned and ("ALL · " .. H.fmt(g.total)) or "ALL"
+        else
+            t.amount.Text = owned and (H.fmt(tonumber(rule) or 0) .. " / " .. H.fmt(g.total)) or H.fmt(tonumber(rule) or 0)
+        end
     end
     local wasOn = t.check.Visible
     t.check.Visible = on
@@ -2039,46 +2086,82 @@ function UI.paintTile(t, animate)
     end
 end
 
+-- builds tiles a batch at a time (hundreds of entries) and keeps filters/counts current
 function UI.renderGrid()
-    UI.gridDirty = false
-    local groups = H.groups()
-    local seen = {}
+    local owned = {}
+    for _, g in ipairs(H.groups()) do
+        owned[g.name] = g
+    end
+    local created = 0
+    local pending = false
     local selItems, selCount, shown = 0, 0, 0
-    for i, g in ipairs(groups) do
-        seen[g.name] = true
-        local t = UI.tileFor(g)
+    for i, c in ipairs(UI.catalogList()) do
+        local og = owned[c.name]
+        local g = { name = c.name, cfg = c.cfg, kind = c.kind, tradeable = c.tradeable,
+            total = og and og.total or 0, keys = og and og.keys or {} }
         local passFilter = UI.filter == "All" or (UI.filter == "Units" and g.kind == "Unit")
             or (UI.filter == "Items" and g.kind ~= "Unit")
         local passSearch = UI.search == "" or string.find(H.lower(g.name), UI.search, 1, true) ~= nil
-        t.visible = passFilter and passSearch
-        t.frame.Visible = t.visible
-        t.frame.LayoutOrder = i
-        if t.visible then
+        local passOwn = UI.own == "None" or (UI.own == "Owned" and g.total > 0) or (UI.own == "Not owned" and g.total == 0)
+        local visible = passFilter and passSearch and passOwn
+        local t = UI.tiles[g.name]
+        if not t and visible then
+            if created < 60 then
+                t = UI.tileFor(g)
+                created = created + 1
+            else
+                pending = true
+            end
+        end
+        if t then
+            t.group = g
+            t.visible = visible
+            t.frame.Visible = visible
+            t.frame.LayoutOrder = i
+            if visible then
+                UI.paintTile(t, false)
+            end
+        end
+        if visible then
             shown = shown + 1
         end
-        UI.paintTile(t, false)
         local rule = S.plan.all and (g.tradeable and "all" or nil) or S.plan.rules[g.name]
         if rule then
             selItems = selItems + 1
-            selCount = selCount + ((rule == "all") and g.total or math.min(tonumber(rule) or 0, g.total))
+            if g.total > 0 then
+                selCount = selCount + ((rule == "all") and g.total or math.min(tonumber(rule) or 0, g.total))
+            end
         end
     end
-    for name, t in pairs(UI.tiles) do
-        if not seen[name] then
-            UI.tiles[name] = nil
-            t.frame:Destroy()
-        end
-    end
+    UI.gridDirty = pending
     UI.el.gridEmpty.Visible = shown == 0
-    local other = 0
-    for name in pairs(S.plan.rules) do
-        if not seen[name] then
-            other = other + 1
+    UI.el.itemSummary.Text = (S.plan.all and "EVERYTHING tradeable  ·  " or "") .. selItems .. " picked  ·  "
+        .. H.fmt(selCount) .. " pcs here  ·  " .. shown .. " shown"
+    UI.el.sumDot.BackgroundColor3 = (selItems > 0 or S.plan.all) and (S.plan.all and TH.Bad or TH.Good) or TH.Dim
+end
+
+-- request game icons only for tiles near the visible part of the grid
+function UI.lazyIcons()
+    if not M.EntryIcon or not UI.el.grid then
+        return
+    end
+    local grid = UI.el.grid
+    local top = grid.AbsolutePosition.Y - 200
+    local bottom = grid.AbsolutePosition.Y + grid.AbsoluteSize.Y + 300
+    local asked = 0
+    for _, t in pairs(UI.tiles) do
+        if t.iconState == "none" and t.visible and t.frame.Visible then
+            local y = t.frame.AbsolutePosition.Y
+            if y > top and y < bottom then
+                t.iconState = "pending"
+                ICON.request(t.group.name, t.group.keys[1] and t.group.keys[1].key, t.holder)
+                asked = asked + 1
+                if asked >= 12 then
+                    return
+                end
+            end
         end
     end
-    UI.el.itemSummary.Text = (S.plan.all and "EVERYTHING tradeable  ·  " or "") .. selItems .. " picked  ·  "
-        .. H.fmt(selCount) .. " pcs" .. (other > 0 and ("  ·  +" .. other .. " from other screens") or "")
-    UI.el.sumDot.BackgroundColor3 = (selItems > 0 or S.plan.all) and (S.plan.all and TH.Bad or TH.Good) or TH.Dim
 end
 
 -- deliver finished game icons into their tiles; the game's own text labels (count / income
@@ -2342,9 +2425,12 @@ function UI.frame(dt)
         local ok, err = pcall(function()
             UI.updateRun()
             UI.updateSenderRows()
-            if UI.tab and UI.tab.name == "Items" and (UI.gridDirty or (UI.gridAt or 0) < t) then
-                UI.gridAt = t + 5
-                UI.renderGrid()
+            if UI.tab and UI.tab.name == "Items" then
+                if UI.gridDirty or (UI.gridAt or 0) < t then
+                    UI.gridAt = t + 5
+                    UI.renderGrid()
+                end
+                UI.lazyIcons()
             end
             if UI.lastPlanRev ~= S.planRev then
                 UI.lastPlanRev = S.planRev
