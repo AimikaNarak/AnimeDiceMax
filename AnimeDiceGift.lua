@@ -59,8 +59,8 @@ local S = {
         follow = true,       -- senders teleport to the receiver's server (queued)
         followPicked = false,
         batch = 4,           -- how many senders may be in the receiver's server at once
-        manager = "Storm",   -- None | Storm | Masterp | Horst: told "finished" when a sender is done
-        managerPicked = false, -- false = never changed in the UI -> always Storm
+        manager = "Masterp", -- None | Storm | Masterp | Horst: told "finished" when a sender is done
+        managerPicked = false, -- false = never changed in the UI -> always Masterp
         rev = 0,
     },
     planRev = -1,
@@ -327,9 +327,9 @@ function FS.loadPlan()
         S.plan.followPicked = p.followPicked == true
         S.plan.follow = (not S.plan.followPicked) or p.follow == true
         S.plan.batch = math.clamp(tonumber(p.batch) or 4, 1, 8)
-        -- Storm unless someone picked another option in the Run page
+        -- Masterp unless someone picked another option in the Run page
         S.plan.managerPicked = p.managerPicked == true
-        S.plan.manager = (S.plan.managerPicked and type(p.manager) == "string") and p.manager or "Storm"
+        S.plan.manager = (S.plan.managerPicked and type(p.manager) == "string") and p.manager or "Masterp"
         S.plan.rev = p.rev
         return true
     end
@@ -2317,7 +2317,7 @@ function UI.buildRun(page)
         return S.plan.manager
     end, function(v)
         S.plan.manager = v
-        S.plan.managerPicked = v ~= "Storm"
+        S.plan.managerPicked = v ~= "Masterp"
         FS.savePlan()
         el.mgrSeg.paint()
         UI.toast(v == "None" and "Senders stay in game when done" or ("Done senders → " .. v .. " finished"), "Good")
