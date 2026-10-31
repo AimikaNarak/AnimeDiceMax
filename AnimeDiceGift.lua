@@ -467,6 +467,11 @@ function MGR.finish(text)
         local f = MGR.fn("Masterp_Done")
         if f then
             MGR.status(text)
+            -- Done closes the game at once; give the "Gift done" description time to arrive
+            -- first, otherwise Masterp keeps the last "TRADING · 1 left" text (seen 2026-10-31)
+            if not MGR.finished then
+                task.wait(4)
+            end
             local ok, res = pcall(f)
             result = ok and ("ok " .. tostring(res)) or ("error " .. tostring(res))
         else
@@ -476,6 +481,9 @@ function MGR.finish(text)
         local f = MGR.fn("Horst_AccountChangeDone")
         if f then
             MGR.status(text)
+            if not MGR.finished then
+                task.wait(4)
+            end
             local ok, res = pcall(f)
             result = ok and ("ok " .. tostring(res)) or ("error " .. tostring(res))
         else
@@ -824,7 +832,7 @@ local function engineLoop()
         end
         if S.role ~= "editor" and plan.running and S.phase ~= "done" then
             pcall(MGR.status, "Gift " .. S.role .. " · " .. string.upper(S.phase) .. " · sent " .. S.sent
-                .. (S.role == "sender" and (" · " .. S.remaining .. " left") or ""))
+                .. (S.role == "sender" and (" · " .. S.remaining .. " entries left") or ""))
         end
         task.wait(S.role == "receiver" and 0.3 or 1)
     end
