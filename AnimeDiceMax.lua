@@ -2407,7 +2407,7 @@ function UI.build()
         Size = UDim2.fromOffset(90, 40),
         Parent = header,
     })
-    el.sub = UI.label("· Linggung", 13, TH.Dim, TH.Bold, {
+    el.sub = UI.label("· By Aimika", 13, TH.Dim, TH.Bold, {
         Position = UDim2.fromOffset(100, 0),
         Size = UDim2.fromOffset(120, 40),
         Parent = header,

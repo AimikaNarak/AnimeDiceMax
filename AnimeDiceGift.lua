@@ -1,4 +1,4 @@
--- Anime Dice · Trade Hub (Linggung)
+-- Anime Dice · Trade Hub (By Aimika)
 -- Several sender accounts trade the items you pick to ONE receiver account.
 --
 -- Everything is set in the window and saved to workspace/AnimeDice/gift/plan.json, which every
@@ -1319,7 +1319,7 @@ function UI.build()
     local header = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 46), Parent = el.win })
     UI.label("ANIME DICE", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(18, 0),
         Size = UDim2.fromOffset(90, 46), Parent = header })
-    UI.label("· Linggung", 13, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(104, 0),
+    UI.label("· By Aimika", 13, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(104, 0),
         Size = UDim2.fromOffset(90, 46), Parent = header })
     UI.chip(header, "TRADE HUB", TH.Purple, { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 190, 0.5, 0) })
     el.roleChip = UI.chip(header, "EDITOR", TH.Sub, { AnchorPoint = Vector2.new(1, 0.5),
