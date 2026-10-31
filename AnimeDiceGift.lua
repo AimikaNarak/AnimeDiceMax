@@ -59,6 +59,7 @@ local S = {
         follow = true,       -- senders teleport to the receiver's server (queued)
         followPicked = false,
         batch = 4,           -- how many senders may be in the receiver's server at once
+        hop = true,          -- receiver moves to an emptier public server when its own is too full
         manager = "Masterp", -- None | Storm | Masterp | Horst: told "finished" when a sender is done
         managerPicked = false, -- false = never changed in the UI -> always Masterp
         rev = 0,
@@ -256,6 +257,29 @@ function H.toSend()
     return out
 end
 
+-- public server with at least minFree open slots, the emptiest one first
+function H.findServer(minFree)
+    local url = "https://games.roblox.com/v1/games/" .. game.PlaceId
+        .. "/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
+    local ok, body = pcall(game.HttpGet, game, url)
+    if not ok then
+        log("server list failed: " .. tostring(body), "Bad")
+        return nil
+    end
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+    if not ok2 or type(data) ~= "table" or type(data.data) ~= "table" then
+        return nil
+    end
+    local best, bestFree = nil, -1
+    for _, sv in ipairs(data.data) do
+        local open = (sv.maxPlayers or 0) - (sv.playing or 0)
+        if sv.id ~= game.JobId and open >= minFree and open > bestFree then
+            best, bestFree = sv.id, open
+        end
+    end
+    return best
+end
+
 function H.findPlayer(name)
     for _, p in ipairs(Players:GetPlayers()) do
         if H.lower(p.Name) == H.lower(name) then
@@ -327,6 +351,7 @@ function FS.loadPlan()
         S.plan.followPicked = p.followPicked == true
         S.plan.follow = (not S.plan.followPicked) or p.follow == true
         S.plan.batch = math.clamp(tonumber(p.batch) or 4, 1, 8)
+        S.plan.hop = p.hop ~= false
         -- Masterp unless someone picked another option in the Run page
         S.plan.managerPicked = p.managerPicked == true
         S.plan.manager = (S.plan.managerPicked and type(p.manager) == "string") and p.manager or "Masterp"
@@ -732,14 +757,43 @@ local function receiverTick()
         end
         return
     end
-    local here = 0
+    local here, busyHere, waiting = 0, 0, 0
     for _, s in ipairs(S.plan.senders) do
+        local st = S.statuses[H.lower(s.name)]
         if H.findPlayer(s.name) then
             here = here + 1
+            if st and not st.stale and st.phase ~= "done" then
+                busyHere = busyHere + 1
+            end
+        elseif st and not st.stale and st.phase ~= "done" then
+            waiting = waiting + 1
         end
     end
     S.phase = "receiving"
     S.msg = "ready · " .. here .. "/" .. #S.plan.senders .. " senders in this server"
+    -- server too full for the senders queued outside? move to an emptier public server.
+    -- Never mid-trade, never while a sender here is still working, once a minute at most.
+    local batch = math.clamp(tonumber(S.plan.batch) or 4, 1, 8)
+    local need = math.min(batch, waiting)
+    local free = Players.MaxPlayers - #Players:GetPlayers()
+    if S.plan.hop and need > 0 and free < need and busyHere == 0
+        and game.PrivateServerId == "" and os.time() - (S.lastHop or 0) > 60 and os.time() - S.joinedAt > 20 then
+        S.lastHop = os.time()
+        local id = H.findServer(need + 1)
+        if id then
+            S.msg = "server full (" .. free .. " free, " .. need .. " waiting) · moving to an emptier server"
+            log(S.msg)
+            if queue_on_teleport or queueonteleport then
+                pcall(queue_on_teleport or queueonteleport,
+                    "repeat task.wait() until game:IsLoaded()\nloadstring(game:HttpGet(\"" .. K.URL .. "\"))()")
+            end
+            pcall(TeleportService.TeleportToPlaceInstance, TeleportService, game.PlaceId, id, LP)
+        else
+            log("no public server with " .. (need + 1) .. " free slots found - staying", "Warn")
+        end
+    elseif need > 0 and free < need then
+        S.msg = S.msg .. " · " .. free .. " free, " .. need .. " waiting"
+    end
 end
 
 local function engineLoop()
@@ -2324,13 +2378,21 @@ function UI.buildRun(page)
     end, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -5, 0.5, 0) })
 
     -- progress list
-    UI.section(page, "Progress", 4)
-    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 150), LayoutOrder = 5 })
+    local hopHolder = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 4,
+        Parent = page })
+    el.hopToggle = UI.toggle(hopHolder, "Receiver finds an emptier server when its server is full", function()
+        return S.plan.hop
+    end, function(v)
+        S.plan.hop = v
+        FS.savePlan()
+    end)
+    UI.section(page, "Progress", 5)
+    el.progress = UI.scroller(page, { Size = UDim2.new(1, 0, 0, 110), LayoutOrder = 6 })
     UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.progress })
     el.progRows = {}
 
     -- log
-    local logBox = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 92), LayoutOrder = 6, Parent = page },
+    local logBox = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 92), LayoutOrder = 7, Parent = page },
         { UI.corner(8), UI.stroke(), UI.pad(8) })
     el.logLines = {}
     for i = 1, 5 do
@@ -2461,6 +2523,9 @@ function UI.frame(dt)
                 end
                 if el.batchLabel then
                     el.batchLabel.Text = tostring(S.plan.batch)
+                end
+                if el.hopToggle then
+                    el.hopToggle.paint()
                 end
                 if S.plan.receiver then
                     el.recvBox.Text = S.plan.receiver.name
