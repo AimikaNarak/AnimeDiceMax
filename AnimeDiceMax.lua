@@ -4086,14 +4086,14 @@ function UI.buildTreeTiles()
         local up = M.Upgrades[name]
         local tile
         local okTpl = false
-        -- hexagon outline behind the tile (pointy-top, like the game's hex): six rounded edges
+        -- hexagon outline behind the tile (flat-top, like the game's hex): six rounded edges
         local glow = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = p,
             Size = UDim2.fromOffset(2, 2), ZIndex = 2, Parent = canvas })
         for k = 0, 5 do
-            local ang = math.rad(k * 60)
+            local ang = math.rad(k * 60 + 30)
             UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, BackgroundColor3 = Color3.fromRGB(80, 255, 130),
                 Position = UDim2.new(0.5, math.cos(ang) * TREE_HEX_R * 0.866, 0.5, math.sin(ang) * TREE_HEX_R * 0.866),
-                Size = UDim2.fromOffset(TREE_HEX_R + 8, 10), Rotation = k * 60 + 90, ZIndex = 2, Parent = glow }, { UI.corner() })
+                Size = UDim2.fromOffset(TREE_HEX_R + 8, 10), Rotation = k * 60 + 120, ZIndex = 2, Parent = glow }, { UI.corner() })
         end
 
         if tpl then
