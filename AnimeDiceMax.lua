@@ -198,6 +198,7 @@ do
     M.Daily = req(F.Rewards.DailyRewardConfig, "DailyRewardConfig")
     M.TradeConfig = req(F.Trading.TradeConfig, "TradeConfig")
     M.NF = req(ReplicatedStorage.Packages.NumberFormatter, "NumberFormatter")
+    M.Rarities = req(fw.Other.Rarities, "Rarities")
 end
 local D = M.Data
 
@@ -557,6 +558,76 @@ function H.upgradesOwned()
     return n
 end
 
+-- ── goal: what "maxed" means (set in the Goal tab, shared by every screen on this PC) ──
+-- Starts from the loader config (Chain.MaxedWhen / Rebirth.StopAt / UpgradeGiveUpMin); once
+-- someone changes it in the window it is saved to AnimeDice/max_goal.json and every screen
+-- on this PC follows that file.
+local G = { needDice = false, dice = S.topDice, needRebirth = false, rebirth = S.rebirthTarget,
+    needUpgrades = false, giveUp = tonumber(CFG.Chain.UpgradeGiveUpMin) or 0, keepIncome = nil, rev = 0 }
+do
+    local need = H.set(CFG.Chain.MaxedWhen)
+    G.needDice = need.Dice == true
+    G.needRebirth = need.Rebirth == true
+    G.needUpgrades = need.Upgrades == true
+end
+
+local GL = { path = "AnimeDice/max_goal.json", seenRev = -1 }
+
+function GL.save()
+    G.rev = os.time() + math.random()
+    GL.seenRev = G.rev
+    if not writefile then
+        return
+    end
+    pcall(function()
+        if not isfolder("AnimeDice") then makefolder("AnimeDice") end
+        writefile(GL.path, HttpService:JSONEncode(G))
+    end)
+end
+
+function GL.load()
+    if not (isfile and readfile) or not isfile(GL.path) then
+        return false
+    end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(GL.path))
+    end)
+    if not ok or type(data) ~= "table" or data.rev == GL.seenRev then
+        return false
+    end
+    GL.seenRev = data.rev
+    G.rev = data.rev
+    G.needDice = data.needDice == true
+    if type(data.dice) == "string" and M.Dice.Get(data.dice) then
+        G.dice = data.dice
+    end
+    G.needRebirth = data.needRebirth == true
+    G.rebirth = math.clamp(tonumber(data.rebirth) or S.rebirthTarget, 1, S.maxRebirth)
+    G.needUpgrades = data.needUpgrades == true
+    G.giveUp = math.max(0, tonumber(data.giveUp) or 0)
+    if type(data.keepIncome) == "number" then
+        G.keepIncome = data.keepIncome
+        CFG.Sell.KeepIncomeAbove = data.keepIncome
+    end
+    return true
+end
+
+-- owns the goal dice, or any dice with at least its luck
+function H.hasGoalDice()
+    local all = M.Dice.GetAll()
+    local goal = all[G.dice]
+    if not goal then
+        return false
+    end
+    local owned = D.OwnedDice() or {}
+    for name, d in pairs(all) do
+        if (owned[name] or name == D.Dice()) and (d.luck or 0) >= (goal.luck or 0) then
+            return true
+        end
+    end
+    return false
+end
+
 -- ════════════════════════════════════════════════════════════
 -- SYSTEMS
 -- ════════════════════════════════════════════════════════════
@@ -895,24 +966,23 @@ function SYS.economyLoop()
     end
 end
 
--- "maxed" = every condition in Chain.MaxedWhen holds
+-- "maxed" = every condition picked in the Goal tab (G) holds
 function SYS.maxed()
-    local need = H.set(CFG.Chain.MaxedWhen)
     local res = { ok = true, parts = {} }
-    if need.Rebirth then
-        local okR = D.Rebirth() >= S.rebirthTarget
+    if G.needRebirth then
+        local okR = D.Rebirth() >= G.rebirth
         res.ok = res.ok and okR
-        table.insert(res.parts, "Rebirth " .. D.Rebirth() .. "/" .. S.rebirthTarget .. (okR and " ok" or ""))
+        table.insert(res.parts, "Rebirth " .. D.Rebirth() .. "/" .. G.rebirth .. (okR and " ok" or ""))
     end
-    if need.Dice then
-        local okD = S.topDice ~= nil and (D.OwnedDice() or {})[S.topDice] == true
+    if G.needDice then
+        local okD = H.hasGoalDice()
         res.ok = res.ok and okD
-        table.insert(res.parts, "Dice " .. tostring(S.topDice) .. (okD and " ok" or " no"))
+        table.insert(res.parts, "Dice " .. tostring(G.dice) .. (okD and " ok" or " no"))
     end
-    if need.Upgrades then
+    if G.needUpgrades then
         local owned = H.upgradesOwned()
         local okU = owned >= S.upgradeTotal
-        local giveUp = tonumber(CFG.Chain.UpgradeGiveUpMin) or 0
+        local giveUp = tonumber(G.giveUp) or 0
         if not okU and giveUp > 0 and os.time() - S.lastUpgradeBuy >= giveUp * 60 then
             -- stalled for N minutes: maxed if every remaining upgrade costs more than we hold
             local money = D.Money()
@@ -929,7 +999,7 @@ function SYS.maxed()
         res.ok = res.ok and okU
         table.insert(res.parts, "Upgrades " .. owned .. "/" .. S.upgradeTotal .. (okU and " ok" or ""))
     end
-    res.text = table.concat(res.parts, " · ")
+    res.text = #res.parts > 0 and table.concat(res.parts, " · ") or "no goal set"
     return res
 end
 
@@ -2047,31 +2117,36 @@ function CH.loop()
 end
 
 -- ════════════════════════════════════════════════════════════
--- UI · Chain Status card
--- One card that answers "what is this account doing right now": a pulsing phase orb with a
--- big title (the colour IS the phase), goal progress, where we sit in the chain, live stats,
--- the tower and the latest log line. Every write happens on our own Heartbeat, never inside a
--- game callback (Potassium rejects GUI writes from game threads).
+-- UI · Anime Dice Max hub (same look as the Trade Hub)
+--   Status  phase orb + title, goal progress, chain track, live stats, tower, log, chips
+--   Goal    what "maxed" means: target dice (pick from every dice), rebirth, skill tree
+--   Chain   every account in Chain.Order with avatar + live status from the chain files
+--   Farm    runtime toggles and the sell threshold
+-- All writes happen on our own Heartbeat, never inside a game callback.
 -- ════════════════════════════════════════════════════════════
-local UI = { gui = nil, conns = {}, el = {}, phase = nil, lastLog = nil, visible = true,
-    minimized = false, refreshAt = 0, nodes = {}, ladder = nil, chips = {} }
+local UI = { gui = nil, conns = {}, el = {}, tabs = {}, pages = {}, tab = nil, phase = nil, lastLog = nil,
+    visible = true, refreshAt = 0, nodes = {}, diceTiles = {}, chainRows = {}, ids = {}, idQueue = {},
+    gridDirty = false }
 
 local TH = {
     Bg = Color3.fromRGB(13, 14, 19),
     Panel = Color3.fromRGB(20, 22, 29),
     Elevated = Color3.fromRGB(29, 31, 41),
+    Hover = Color3.fromRGB(36, 39, 51),
     Stroke = Color3.fromRGB(44, 47, 60),
     Text = Color3.fromRGB(236, 238, 245),
     Sub = Color3.fromRGB(140, 145, 162),
     Dim = Color3.fromRGB(84, 88, 104),
+    Accent = Color3.fromRGB(108, 138, 255),
     Good = Color3.fromRGB(74, 210, 128),
+    Warn = Color3.fromRGB(240, 180, 64),
     Bad = Color3.fromRGB(232, 82, 92),
+    Purple = Color3.fromRGB(190, 110, 255),
     Font = Enum.Font.GothamMedium,
     Bold = Enum.Font.GothamBold,
     Mono = Enum.Font.Code,
 }
 
--- one colour per phase; pulse = orb rings per second
 local PHASES = {
     BUILD = { title = "BUILDING", color = Color3.fromRGB(108, 138, 255), sweep = 70, pulse = 0.6 },
     WAIT = { title = "WAITING FOR TRADE", color = Color3.fromRGB(240, 180, 64), sweep = 140, pulse = 1.1 },
@@ -2091,6 +2166,7 @@ local MOTION = {
     Spring = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
 }
 
+-- ── kit (shared with the Trade Hub) ───────────────────────
 function UI.new(class, props, children)
     local inst = Instance.new(class)
     local parent = nil
@@ -2120,6 +2196,16 @@ function UI.corner(r)
     return UI.new("UICorner", { CornerRadius = r and UDim.new(0, r) or UDim.new(1, 0) })
 end
 
+function UI.stroke(color, t)
+    return UI.new("UIStroke", { Color = color or TH.Stroke, Transparency = t or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+end
+
+function UI.pad(px)
+    return UI.new("UIPadding", { PaddingLeft = UDim.new(0, px), PaddingRight = UDim.new(0, px),
+        PaddingTop = UDim.new(0, px), PaddingBottom = UDim.new(0, px) })
+end
+
 function UI.label(text, size, color, font, props)
     local l = UI.new("TextLabel", {
         BackgroundTransparency = 1,
@@ -2128,7 +2214,6 @@ function UI.label(text, size, color, font, props)
         TextColor3 = color,
         Font = font or TH.Font,
         TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center,
         TextTruncate = Enum.TextTruncate.AtEnd,
     })
     for k, v in pairs(props or {}) do
@@ -2137,33 +2222,303 @@ function UI.label(text, size, color, font, props)
     return l
 end
 
-function UI.track(conn)
-    table.insert(UI.conns, conn)
-    return conn
+function UI.track(c)
+    table.insert(UI.conns, c)
+    return c
 end
 
-function UI.parent()
-    local ok, h = pcall(function()
-        return gethui and gethui()
-    end)
-    if ok and h then
-        return h
+function UI.press(b)
+    local sc = b:FindFirstChildOfClass("UIScale") or UI.new("UIScale", { Parent = b })
+    UI.track(b.MouseButton1Down:Connect(function()
+        UI.tween(sc, MOTION.Fast, { Scale = 0.95 })
+    end))
+    UI.track(b.MouseButton1Up:Connect(function()
+        UI.tween(sc, MOTION.Spring, { Scale = 1 })
+    end))
+    UI.track(b.MouseLeave:Connect(function()
+        UI.tween(sc, MOTION.Spring, { Scale = 1 })
+    end))
+end
+
+function UI.button(parent, text, color, props, onClick)
+    local b = UI.new("TextButton", {
+        AutoButtonColor = false,
+        Text = text,
+        TextSize = 12,
+        Font = TH.Bold,
+        TextColor3 = TH.Text,
+        BackgroundColor3 = color or TH.Elevated,
+        Parent = parent,
+    }, { UI.corner(8) })
+    for k, v in pairs(props or {}) do
+        b[k] = v
     end
-    local okCore, core = pcall(function()
-        return game:GetService("CoreGui")
-    end)
-    if okCore and core then
-        local okTest = pcall(function()
-            return core.Name
+    UI.press(b)
+    local base = b.BackgroundColor3
+    UI.track(b.MouseEnter:Connect(function()
+        UI.tween(b, MOTION.Fast, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) })
+    end))
+    UI.track(b.MouseLeave:Connect(function()
+        UI.tween(b, MOTION.Fast, { BackgroundColor3 = base })
+    end))
+    UI.track(b.Activated:Connect(function()
+        task.spawn(function()
+            local ok, err = pcall(onClick, b)
+            if not ok then
+                log("button error: " .. tostring(err), "Bad")
+                UI.toast("error: " .. tostring(err), "Bad")
+            end
         end)
-        if okTest then
-            return core
+    end))
+    return b
+end
+
+function UI.input(parent, placeholder, props)
+    local box = UI.new("TextBox", {
+        BackgroundColor3 = TH.Panel,
+        PlaceholderText = placeholder,
+        PlaceholderColor3 = TH.Dim,
+        Text = "",
+        TextSize = 13,
+        Font = TH.Font,
+        TextColor3 = TH.Text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false,
+        Parent = parent,
+    }, { UI.corner(8), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }) })
+    local st = UI.stroke(TH.Stroke)
+    st.Parent = box
+    UI.track(box.Focused:Connect(function()
+        UI.tween(st, MOTION.Fast, { Color = TH.Accent })
+    end))
+    UI.track(box.FocusLost:Connect(function()
+        UI.tween(st, MOTION.Fast, { Color = TH.Stroke })
+    end))
+    for k, v in pairs(props or {}) do
+        box[k] = v
+    end
+    return box
+end
+
+function UI.section(parent, text, order)
+    return UI.label(string.upper(text), 10, TH.Dim, TH.Bold, {
+        Size = UDim2.new(1, 0, 0, 14), LayoutOrder = order, Parent = parent })
+end
+
+function UI.toast(text, kind)
+    if not UI.gui then
+        return
+    end
+    local color = kind == "Bad" and TH.Bad or (kind == "Good" and TH.Good or TH.Accent)
+    local t = UI.new("Frame", {
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.new(0.5, 0, 0, -4),
+        Size = UDim2.fromOffset(0, 30),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = TH.Panel,
+        BackgroundTransparency = 1,
+        ZIndex = 50,
+        Parent = UI.el.win,
+    }, { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }) })
+    local s = UI.stroke(color, 1)
+    s.Parent = t
+    local l = UI.label(text, 12, TH.Text, TH.Bold, { Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X, TextTransparency = 1, ZIndex = 51, Parent = t })
+    UI.tween(t, MOTION.Spring, { Position = UDim2.new(0.5, 0, 0, -10), BackgroundTransparency = 0 })
+    UI.tween(s, MOTION.Base, { Transparency = 0.2 })
+    UI.tween(l, MOTION.Base, { TextTransparency = 0 })
+    task.delay(2.8, function()
+        if t.Parent then
+            UI.tween(t, MOTION.Base, { BackgroundTransparency = 1 })
+            UI.tween(s, MOTION.Base, { Transparency = 1 })
+            UI.tween(l, MOTION.Base, { TextTransparency = 1 })
+            task.wait(0.3)
+            t:Destroy()
+        end
+    end)
+end
+
+function UI.avatar(parent, size, props)
+    local holder = UI.new("Frame", { Size = UDim2.fromOffset(size, size), BackgroundColor3 = TH.Elevated,
+        Parent = parent }, { UI.corner() })
+    for k, v in pairs(props or {}) do
+        holder[k] = v
+    end
+    local img = UI.new("ImageLabel", { BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+        ImageTransparency = 1, Parent = holder }, { UI.corner() })
+    local ring = UI.new("UIStroke", { Color = TH.Stroke, Thickness = 2, Parent = holder })
+    local api = { holder = holder, ring = ring }
+    function api.set(userId, color)
+        ring.Color = color or TH.Stroke
+        if not userId then
+            img.ImageTransparency = 1
+            return
+        end
+        task.spawn(function()
+            local ok, url = pcall(Players.GetUserThumbnailAsync, Players, userId,
+                Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+            if ok and url and holder.Parent then
+                img.Image = url
+                img.ImageTransparency = 1
+                UI.tween(img, MOTION.Slow, { ImageTransparency = 0 })
+            end
+        end)
+    end
+    return api
+end
+
+function UI.chip(parent, text, color, props)
+    local c = UI.new("TextLabel", {
+        BackgroundColor3 = color or TH.Elevated,
+        BackgroundTransparency = 0.82,
+        Size = UDim2.fromOffset(0, 20),
+        AutomaticSize = Enum.AutomaticSize.X,
+        Text = text,
+        TextSize = 11,
+        Font = TH.Bold,
+        TextColor3 = color or TH.Sub,
+        Parent = parent,
+    }, { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }) })
+    for k, v in pairs(props or {}) do
+        c[k] = v
+    end
+    return c
+end
+
+function UI.toggle(parent, text, getOn, onChange, order)
+    local row = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Panel,
+        Size = UDim2.new(1, 0, 0, 38), LayoutOrder = order, Parent = parent }, { UI.corner(8), UI.stroke() })
+    UI.label(text, 13, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -70, 1, 0),
+        Parent = row })
+    local track = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
+        Size = UDim2.fromOffset(38, 20), BackgroundColor3 = TH.Elevated, Parent = row }, { UI.corner() })
+    local knob = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
+        Size = UDim2.fromOffset(14, 14), BackgroundColor3 = TH.Sub, Parent = track }, { UI.corner() })
+    local function paint()
+        local on = getOn()
+        UI.tween(track, MOTION.Base, { BackgroundColor3 = on and TH.Accent or TH.Elevated })
+        UI.tween(knob, MOTION.Spring, { Position = on and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+            BackgroundColor3 = on and TH.Text or TH.Sub })
+    end
+    UI.track(row.Activated:Connect(function()
+        onChange(not getOn())
+        paint()
+    end))
+    paint()
+    return { row = row, paint = paint }
+end
+
+function UI.scroller(parent, props)
+    local sf = UI.new("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = TH.Stroke,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        Parent = parent,
+    })
+    for k, v in pairs(props or {}) do
+        sf[k] = v
+    end
+    return sf
+end
+
+function UI.segmented(parent, options, getValue, onPick, props, width)
+    local w = width or 70
+    local seg = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.fromOffset(#options * w + 6, 36),
+        Parent = parent }, { UI.corner(10), UI.stroke() })
+    for k, v in pairs(props or {}) do
+        seg[k] = v
+    end
+    local hi = UI.new("Frame", { BackgroundColor3 = TH.Accent, Position = UDim2.fromOffset(3, 3),
+        Size = UDim2.fromOffset(w, 30), Parent = seg }, { UI.corner(8) })
+    local labels = {}
+    for i, opt in ipairs(options) do
+        local b = UI.new("TextButton", { AutoButtonColor = false, BackgroundTransparency = 1, Text = opt,
+            TextSize = 12, Font = TH.Bold, TextColor3 = TH.Sub, Position = UDim2.fromOffset(3 + (i - 1) * w, 3),
+            Size = UDim2.fromOffset(w, 30), ZIndex = 2, Parent = seg })
+        labels[opt] = { button = b, index = i }
+        UI.track(b.Activated:Connect(function()
+            onPick(opt)
+        end))
+    end
+    local api = { frame = seg }
+    function api.paint()
+        local cur = getValue()
+        for opt, l in pairs(labels) do
+            local on = opt == cur
+            UI.tween(l.button, MOTION.Base, { TextColor3 = on and TH.Text or TH.Sub })
+            if on then
+                UI.tween(hi, MOTION.Spring, { Position = UDim2.fromOffset(3 + (l.index - 1) * w, 3) })
+            end
         end
     end
-    return LP:WaitForChild("PlayerGui")
+    api.paint()
+    return api
 end
 
--- ── which phase are we in (same rules as the account-manager description) ──
+function UI.page(name, order)
+    local page = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Visible = false,
+        Parent = UI.el.pages }, { UI.pad(16) })
+    local btn = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Elevated,
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36), LayoutOrder = order,
+        Parent = UI.el.sidebar }, { UI.corner(8) })
+    local l = UI.label(name, 13, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -20, 1, 0), Parent = btn })
+    local tab = { name = name, page = page, btn = btn, label = l, order = order }
+    UI.tabs[name] = tab
+    UI.pages[name] = page
+    UI.track(btn.Activated:Connect(function()
+        UI.select(name)
+    end))
+    UI.track(btn.MouseEnter:Connect(function()
+        if UI.tab ~= tab then
+            UI.tween(btn, MOTION.Fast, { BackgroundTransparency = 0.4 })
+        end
+    end))
+    UI.track(btn.MouseLeave:Connect(function()
+        if UI.tab ~= tab then
+            UI.tween(btn, MOTION.Fast, { BackgroundTransparency = 1 })
+        end
+    end))
+    return page
+end
+
+function UI.select(name)
+    local tab = UI.tabs[name]
+    if not tab or UI.tab == tab then
+        return
+    end
+    if UI.tab then
+        UI.tab.page.Visible = false
+        UI.tween(UI.tab.btn, MOTION.Fast, { BackgroundTransparency = 1 })
+        UI.tween(UI.tab.label, MOTION.Fast, { TextColor3 = TH.Sub })
+    end
+    UI.tab = tab
+    tab.page.Visible = true
+    tab.page.Position = UDim2.fromOffset(0, 10)
+    UI.tween(tab.page, MOTION.Slow, { Position = UDim2.fromOffset(0, 0) })
+    UI.tween(tab.btn, MOTION.Base, { BackgroundTransparency = 0 })
+    UI.tween(tab.label, MOTION.Base, { TextColor3 = TH.Text })
+    -- sliding indicator
+    -- sidebar starts at y=47, 10px top padding, 36px buttons + 4px gap
+    UI.tween(UI.el.indicator, MOTION.Spring, {
+        Position = UDim2.fromOffset(4, 47 + 10 + (tab.order - 1) * 40 + 9) })
+    if name == "Items" then
+        UI.gridDirty = true
+    end
+end
+
+function UI.fitScale()
+    local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+    local byH = (vp.Y * 0.82) / 580
+    local byW = (vp.X * 0.9) / 880
+    return math.clamp(math.min(byH, byW), 0.55, 1.15)
+end
+
+
+-- ── phase + goal progress ───────────────────────────────────
 function UI.phaseKey()
     local ch = S.chain
     if ch.done then
@@ -2187,27 +2542,40 @@ function UI.phaseKey()
     return "QUEUE"
 end
 
--- dice owned by price order, so "Genesis → Skeleton" can become a fraction
-function UI.diceFrac()
-    if not UI.ladder then
-        local list = {}
-        for name, d in pairs(M.Dice.GetAll()) do
-            table.insert(list, { name = name, price = d.price or 0 })
-        end
-        table.sort(list, function(a, b)
-            return a.price < b.price
-        end)
-        UI.ladder = {}
-        for i, d in ipairs(list) do
-            UI.ladder[d.name] = i
-        end
-        UI.ladderTop = #list
+-- every dice with a price, cheapest first (built once)
+function UI.diceList()
+    if UI.dice then
+        return UI.dice
     end
-    local cur = UI.ladder[D.Dice()] or 1
-    return (cur - 1) / math.max(1, UI.ladderTop - 1)
+    local list = {}
+    for name, d in pairs(M.Dice.GetAll()) do
+        table.insert(list, { name = name, cfg = d, price = d.price or 0, luck = d.luck or 0 })
+    end
+    table.sort(list, function(a, b)
+        return a.price < b.price
+    end)
+    UI.dice = list
+    return list
 end
 
--- progress fraction + the small text on the right of the bar
+-- how far toward the goal dice (by position on the price ladder)
+function UI.diceFrac()
+    local list = UI.diceList()
+    local cur, goal = 1, #list
+    local best = 0
+    local owned = D.OwnedDice() or {}
+    for i, d in ipairs(list) do
+        if (owned[d.name] or d.name == D.Dice()) and i > best then
+            best = i
+        end
+        if d.name == G.dice then
+            goal = i
+        end
+    end
+    cur = math.max(best, 1)
+    return math.clamp((cur - 1) / math.max(1, goal - 1), 0, 1)
+end
+
 function UI.goal(key)
     local ch = S.chain
     if key == "SUCCESS" then
@@ -2221,64 +2589,23 @@ function UI.goal(key)
         local frac = me > 1 and math.clamp((bi - 1) / (me - 1), 0, 1) or 1
         return frac, key == "JOIN" and "your turn" or (ahead == 0 and "next up" or (ahead .. " ahead"))
     end
-    local need = H.set(CFG.Chain.MaxedWhen)
     local sum, n = 0, 0
-    if need.Dice then
-        sum = sum + UI.diceFrac()
+    if G.needDice then
+        sum = sum + (H.hasGoalDice() and 1 or UI.diceFrac())
         n = n + 1
     end
-    if need.Rebirth then
-        sum = sum + D.Rebirth() / math.max(1, S.rebirthTarget)
+    if G.needRebirth then
+        sum = sum + math.clamp(D.Rebirth() / math.max(1, G.rebirth), 0, 1)
         n = n + 1
     end
-    if need.Upgrades then
+    if G.needUpgrades then
         sum = sum + H.upgradesOwned() / math.max(1, S.upgradeTotal)
         n = n + 1
     end
-    local f = n > 0 and math.clamp(sum / n, 0, 1) or 0
+    local f = n > 0 and math.clamp(sum / n, 0, 1) or 1
     return f, math.floor(f * 100 + 0.5) .. "%"
 end
 
-function UI.toast(text, kind)
-    if not UI.gui then
-        return
-    end
-    local color = kind == "Bad" and TH.Bad or (kind == "Good" and TH.Good or PHASES.BUILD.color)
-    local t = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0.5, 1),
-        Position = UDim2.new(0.5, 0, 0, -4),
-        Size = UDim2.fromOffset(0, 30),
-        AutomaticSize = Enum.AutomaticSize.X,
-        BackgroundColor3 = TH.Panel,
-        BackgroundTransparency = 1,
-        Parent = UI.el.card,
-    }, {
-        UI.corner(),
-        UI.new("UIStroke", { Color = color, Transparency = 1, Thickness = 1 }),
-        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }),
-    })
-    local l = UI.label(text, 12, TH.Text, TH.Bold, {
-        Size = UDim2.new(0, 0, 1, 0),
-        AutomaticSize = Enum.AutomaticSize.X,
-        TextTransparency = 1,
-        Parent = t,
-    })
-    local s = t:FindFirstChildOfClass("UIStroke")
-    UI.tween(t, MOTION.Spring, { Position = UDim2.new(0.5, 0, 0, -10), BackgroundTransparency = 0 })
-    UI.tween(s, MOTION.Base, { Transparency = 0.2 })
-    UI.tween(l, MOTION.Base, { TextTransparency = 0 })
-    task.delay(3, function()
-        if t.Parent then
-            UI.tween(t, MOTION.Base, { BackgroundTransparency = 1, Position = UDim2.new(0.5, 0, 0, -2) })
-            UI.tween(s, MOTION.Base, { Transparency = 1 })
-            UI.tween(l, MOTION.Base, { TextTransparency = 1 })
-            task.wait(0.3)
-            t:Destroy()
-        end
-    end)
-end
-
--- confetti-like burst out of the orb (SUCCESS)
 function UI.burst(color)
     local orb = UI.el.orb
     if not orb then
@@ -2287,157 +2614,58 @@ function UI.burst(color)
     for i = 1, 16 do
         local angle = (i / 16) * math.pi * 2 + math.random() * 0.4
         local dist = 34 + math.random() * 26
-        local p = UI.new("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(5, 5),
-            BackgroundColor3 = (i % 3 == 0) and TH.Text or color,
-            ZIndex = 5,
-            Parent = orb,
-        }, { UI.corner() })
+        local p = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(5, 5), BackgroundColor3 = (i % 3 == 0) and TH.Text or color, ZIndex = 5, Parent = orb },
+            { UI.corner() })
         UI.tween(p, TweenInfo.new(0.7, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
             Position = UDim2.new(0.5, math.cos(angle) * dist, 0.5, math.sin(angle) * dist),
-            BackgroundTransparency = 1,
-            Size = UDim2.fromOffset(2, 2),
-        })
+            BackgroundTransparency = 1, Size = UDim2.fromOffset(2, 2) })
         task.delay(0.75, function()
             p:Destroy()
         end)
     end
 end
 
-function UI.chip(parent, text, getOn, onClick, order)
-    local b = UI.new("TextButton", {
-        AutoButtonColor = false,
-        Text = text,
-        TextSize = 12,
-        Font = TH.Bold,
-        TextColor3 = TH.Sub,
-        BackgroundColor3 = TH.Elevated,
-        Size = UDim2.fromOffset(0, 26),
-        AutomaticSize = Enum.AutomaticSize.X,
-        LayoutOrder = order,
-        Parent = parent,
-    }, {
-        UI.corner(),
-        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }),
-        UI.new("UIStroke", { Color = TH.Stroke, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
-        UI.new("UIScale", {}),
-    })
-    local sc = b:FindFirstChildOfClass("UIScale")
-    UI.track(b.MouseButton1Down:Connect(function()
-        UI.tween(sc, MOTION.Fast, { Scale = 0.94 })
-    end))
-    UI.track(b.MouseButton1Up:Connect(function()
-        UI.tween(sc, MOTION.Spring, { Scale = 1 })
-    end))
-    UI.track(b.MouseLeave:Connect(function()
-        UI.tween(sc, MOTION.Spring, { Scale = 1 })
-    end))
-    UI.track(b.Activated:Connect(function()
-        task.spawn(function()
-            local ok, err = pcall(onClick)
-            if not ok then
-                log("button error: " .. tostring(err), "Bad")
-            end
-        end)
-    end))
-    table.insert(UI.chips, { button = b, getOn = getOn, last = nil })
-    return b
+function UI.stat(parent, title)
+    local f = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(0.25, -6, 1, 0), Parent = parent },
+        { UI.corner(10), UI.stroke() })
+    UI.label(string.upper(title), 10, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(12, 9), Size = UDim2.new(1, -20, 0, 12),
+        Parent = f })
+    return UI.label("-", 17, TH.Text, TH.Bold, { Position = UDim2.fromOffset(12, 26), Size = UDim2.new(1, -20, 0, 22), Parent = f })
 end
 
-function UI.stat(parent, title, order)
-    local f = UI.new("Frame", {
-        BackgroundColor3 = TH.Panel,
-        Size = UDim2.new(0.25, -5, 0, 50),
-        LayoutOrder = order,
-        Parent = parent,
-    }, { UI.corner(8), UI.new("UIStroke", { Color = TH.Stroke }) })
-    UI.label(string.upper(title), 10, TH.Dim, TH.Bold, {
-        Position = UDim2.fromOffset(10, 7),
-        Size = UDim2.new(1, -16, 0, 12),
-        Parent = f,
-    })
-    return UI.label("-", 15, TH.Text, TH.Bold, {
-        Position = UDim2.fromOffset(10, 22),
-        Size = UDim2.new(1, -16, 0, 20),
-        Parent = f,
-    })
-end
-
+-- ── window ──────────────────────────────────────────────────
 function UI.build()
-    local parent = UI.parent()
-    local old = parent:FindFirstChild("AnimeDiceChainHUD")
+    local okH, h = pcall(function()
+        return gethui and gethui()
+    end)
+    local parent = (okH and h) or game:GetService("CoreGui")
+    local old = parent:FindFirstChild("AnimeDiceMaxHub")
     if old then
-        old:Destroy() -- the old copy's Heartbeat sees its gui gone and stops itself
+        old:Destroy()
     end
-    local gui = UI.new("ScreenGui", {
-        Name = "AnimeDiceChainHUD",
-        ResetOnSpawn = false,
-        IgnoreGuiInset = true,
-        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-        DisplayOrder = 999,
-    })
+    local gui = UI.new("ScreenGui", { Name = "AnimeDiceMaxHub", ResetOnSpawn = false, IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999 })
     gui.Parent = parent
     UI.gui = gui
     local el = UI.el
+    el.win = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(880, 580), BackgroundColor3 = TH.Bg, Parent = gui },
+        { UI.corner(14), UI.new("UIScale", { Scale = 0.9 }) })
+    el.scale = el.win:FindFirstChildOfClass("UIScale")
+    el.border = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Parent = el.win })
+    el.sweep = UI.new("UIGradient", { Parent = el.border })
 
-    el.card = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, 24, 0.5, 0),
-        Size = UDim2.fromOffset(372, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = TH.Bg,
-        Parent = gui,
-    }, { UI.corner(14), UI.new("UIScale", { Scale = 0.9 }) })
-    el.scale = el.card:FindFirstChildOfClass("UIScale")
-    el.stroke = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Parent = el.card })
-    el.sweep = UI.new("UIGradient", { Parent = el.stroke })
-    UI.new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.card })
-
-    -- header (drag handle)
-    local header = UI.new("Frame", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 40),
-        LayoutOrder = 1,
-        Parent = el.card,
-    })
-    UI.label("ANIME DICE", 13, TH.Text, TH.Bold, {
-        Position = UDim2.fromOffset(16, 0),
-        Size = UDim2.fromOffset(90, 40),
-        Parent = header,
-    })
-    el.sub = UI.label("· By Aimika", 13, TH.Dim, TH.Bold, {
-        Position = UDim2.fromOffset(100, 0),
-        Size = UDim2.fromOffset(120, 40),
-        Parent = header,
-    })
-    el.badge = UI.new("TextLabel", {
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -72, 0.5, 0),
-        Size = UDim2.fromOffset(0, 22),
-        AutomaticSize = Enum.AutomaticSize.X,
-        BackgroundColor3 = TH.Elevated,
-        Text = "-",
-        TextSize = 11,
-        Font = TH.Bold,
-        TextColor3 = TH.Sub,
-        Parent = header,
-    }, { UI.corner(), UI.new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9) }) })
+    local header = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 46), Parent = el.win })
+    UI.label("ANIME DICE", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(18, 0), Size = UDim2.fromOffset(90, 46), Parent = header })
+    UI.label("· By Aimika", 13, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(104, 0), Size = UDim2.fromOffset(90, 46), Parent = header })
+    UI.chip(header, "MAX", TH.Accent, { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 196, 0.5, 0) })
+    el.badge = UI.chip(header, "-", TH.Sub, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -76, 0.5, 0) })
     local function topButton(text, x, hover, fn)
-        local b = UI.new("TextButton", {
-            AutoButtonColor = false,
-            AnchorPoint = Vector2.new(1, 0.5),
-            Position = UDim2.new(1, x, 0.5, 0),
-            Size = UDim2.fromOffset(26, 26),
-            BackgroundColor3 = TH.Elevated,
-            BackgroundTransparency = 1,
-            Text = text,
-            TextSize = 16,
-            Font = TH.Bold,
-            TextColor3 = TH.Dim,
-            Parent = header,
-        }, { UI.corner(7) })
+        local b = UI.new("TextButton", { AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, x, 0.5, 0), Size = UDim2.fromOffset(26, 26), BackgroundColor3 = TH.Elevated,
+            BackgroundTransparency = 1, Text = text, TextSize = 16, Font = TH.Bold, TextColor3 = TH.Dim, Parent = header },
+            { UI.corner(7) })
         UI.track(b.MouseEnter:Connect(function()
             UI.tween(b, MOTION.Fast, { BackgroundTransparency = 0, TextColor3 = hover })
         end))
@@ -2445,33 +2673,29 @@ function UI.build()
             UI.tween(b, MOTION.Fast, { BackgroundTransparency = 1, TextColor3 = TH.Dim })
         end))
         UI.track(b.Activated:Connect(fn))
-        return b
     end
-    topButton("×", -10, TH.Bad, function()
-        -- only stop the script when the window belongs to the run that is still active
+    topButton("×", -12, TH.Bad, function()
         if LP:GetAttribute("AnimeDiceRun") == TOKEN then
             LP:SetAttribute("AnimeDiceRun", nil)
             log("stopped (window closed)")
         end
         UI.destroy()
     end)
-    topButton("–", -40, TH.Text, function()
-        UI.minimized = not UI.minimized
-        el.body.Visible = not UI.minimized
+    topButton("–", -42, TH.Text, function()
+        UI.visible = false
+        UI.gui.Enabled = false
     end)
     do
         local dragging, startMouse, startPos = false, nil, nil
         UI.track(header.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 startMouse = input.Position
-                startPos = el.card.Position
+                startPos = el.win.Position
             end
         end))
         UI.track(UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = false
             end
         end))
@@ -2479,209 +2703,521 @@ function UI.build()
             if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
                 or input.UserInputType == Enum.UserInputType.Touch) then
                 local d = input.Position - startMouse
-                UI.tween(el.card, MOTION.Fast, { Position = UDim2.new(startPos.X.Scale,
-                    startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y) })
+                UI.tween(el.win, MOTION.Fast, { Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                    startPos.Y.Scale, startPos.Y.Offset + d.Y) })
             end
         end))
     end
+    UI.new("Frame", { BackgroundColor3 = TH.Stroke, BorderSizePixel = 0, Position = UDim2.fromOffset(0, 46),
+        Size = UDim2.new(1, 0, 0, 1), Parent = el.win })
 
-    -- phase hero: orb + title + detail (stays visible when minimized)
-    local hero = UI.new("Frame", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 70),
-        LayoutOrder = 2,
-        Parent = el.card,
-    })
-    el.orb = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, 18, 0.5, -4),
-        Size = UDim2.fromOffset(46, 46),
-        BackgroundTransparency = 1,
-        Parent = hero,
-    })
-    el.ring = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        Parent = el.orb,
-    }, { UI.corner(), UI.new("UIScale", {}) })
-    el.ringStroke = UI.new("UIStroke", { Thickness = 2, Parent = el.ring })
-    el.ringScale = el.ring:FindFirstChildOfClass("UIScale")
-    el.halo = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(30, 30),
-        BackgroundTransparency = 0.8,
-        Parent = el.orb,
-    }, { UI.corner() })
-    el.core = UI.new("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(16, 16),
-        Parent = el.orb,
-    }, { UI.corner() })
-    el.title = UI.label("…", 20, TH.Text, TH.Bold, {
-        Position = UDim2.fromOffset(78, 10),
-        Size = UDim2.new(1, -92, 0, 26),
-        Parent = hero,
-    })
-    el.detail = UI.label("", 12, TH.Sub, TH.Font, {
-        Position = UDim2.fromOffset(78, 36),
-        Size = UDim2.new(1, -92, 0, 16),
-        Parent = hero,
-    })
+    -- sidebar (rounded bottom-left via fillers)
+    local sideBg = UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0, Position = UDim2.fromOffset(0, 47),
+        Size = UDim2.new(0, 150, 1, -47), Parent = el.win }, { UI.corner(14) })
+    UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 16), Parent = sideBg })
+    UI.new("Frame", { BackgroundColor3 = TH.Panel, BorderSizePixel = 0, AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 16, 1, 0), Parent = sideBg })
+    el.sidebar = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 47),
+        Size = UDim2.new(0, 150, 1, -47), Parent = el.win },
+        { UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
+          UI.new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }) })
+    el.indicator = UI.new("Frame", { BackgroundColor3 = TH.Accent, BorderSizePixel = 0, Size = UDim2.fromOffset(3, 18),
+        Position = UDim2.fromOffset(4, 66), ZIndex = 3, Parent = el.win }, { UI.corner(2) })
+    el.pages = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(150, 47),
+        Size = UDim2.new(1, -150, 1, -47), ClipsDescendants = true, Parent = el.win })
+    -- mini status at the bottom of the sidebar
+    UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 290), LayoutOrder = 50, Parent = el.sidebar })
+    local side = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 60), LayoutOrder = 99, Parent = el.sidebar })
+    el.sideDot = UI.new("Frame", { Position = UDim2.fromOffset(4, 24), Size = UDim2.fromOffset(10, 10),
+        BackgroundColor3 = TH.Dim, Parent = side }, { UI.corner() })
+    el.sidePhase = UI.label("…", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(20, 16), Size = UDim2.new(1, -20, 0, 16), Parent = side })
+    UI.label(LP.Name, 10, TH.Dim, TH.Font, { Position = UDim2.fromOffset(20, 32), Size = UDim2.new(1, -20, 0, 14), Parent = side })
 
-    -- everything below collapses when minimized
-    el.body = UI.new("Frame", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        LayoutOrder = 3,
-        Parent = el.card,
-    }, {
-        UI.new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }),
-        UI.new("UIPadding", { PaddingLeft = UDim.new(0, 16), PaddingRight = UDim.new(0, 16),
-            PaddingBottom = UDim.new(0, 16) }),
-    })
-    local body = el.body
+    UI.buildStatus(UI.page("Status", 1))
+    UI.buildGoal(UI.page("Goal", 2))
+    UI.buildChain(UI.page("Chain", 3))
+    UI.buildFarm(UI.page("Farm", 4))
 
-    -- status message (what the chain logic says right now)
-    el.msg = UI.label("", 11, TH.Dim, TH.Font, {
-        Size = UDim2.new(1, 0, 0, 14),
-        LayoutOrder = 1,
-        Parent = body,
-    })
-
-    -- goal progress with a moving shine
-    local barRow = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 22),
-        LayoutOrder = 2, Parent = body })
-    el.barLabel = UI.label("GOAL", 10, TH.Dim, TH.Bold, { Size = UDim2.new(0.6, 0, 0, 12), Parent = barRow })
-    el.barValue = UI.label("0%", 10, TH.Sub, TH.Bold, { AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.fromScale(1, 0), Size = UDim2.new(0.4, 0, 0, 12),
-        TextXAlignment = Enum.TextXAlignment.Right, Parent = barRow })
-    local track = UI.new("Frame", { BackgroundColor3 = TH.Elevated, Position = UDim2.fromOffset(0, 15),
-        Size = UDim2.new(1, 0, 0, 7), ClipsDescendants = true, Parent = barRow }, { UI.corner() })
-    el.fill = UI.new("Frame", { Size = UDim2.fromScale(0, 1), Parent = track }, { UI.corner() })
-    el.shine = UI.new("UIGradient", {
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0),
-            NumberSequenceKeypoint.new(0.45, 0),
-            NumberSequenceKeypoint.new(0.5, 0.65),
-            NumberSequenceKeypoint.new(0.55, 0),
-            NumberSequenceKeypoint.new(1, 0),
-        }),
-        Offset = Vector2.new(-1, 0),
-        Parent = el.fill,
-    })
-    UI.tween(el.shine, TweenInfo.new(1.6, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1),
-        { Offset = Vector2.new(1, 0) })
-
-    -- chain track: 5 nodes around this account
-    local chainRow = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40),
-        LayoutOrder = 3, Parent = body })
-    el.chainRow = chainRow
-    el.line = UI.new("Frame", { BackgroundColor3 = TH.Stroke, BorderSizePixel = 0,
-        Position = UDim2.new(0.1, 0, 0, 7), Size = UDim2.new(0.8, 0, 0, 2), Parent = chainRow })
-    el.lineDone = UI.new("Frame", { BackgroundColor3 = TH.Good, BorderSizePixel = 0,
-        Size = UDim2.fromScale(0, 1), Parent = el.line })
-    for i = 1, 5 do
-        local x = 0.1 + (i - 1) * 0.2
-        local dot = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(x, 0, 0, 1),
-            Size = UDim2.fromOffset(14, 14), BackgroundColor3 = TH.Elevated, Parent = chainRow },
-            { UI.corner(), UI.new("UIStroke", { Color = TH.Stroke, Thickness = 1 }), UI.new("UIScale", {}) })
-        local name = UI.label("", 10, TH.Dim, TH.Font, { AnchorPoint = Vector2.new(0.5, 0),
-            Position = UDim2.new(x, 0, 0, 20), Size = UDim2.fromOffset(66, 14),
-            TextXAlignment = Enum.TextXAlignment.Center, Parent = chainRow })
-        UI.nodes[i] = { dot = dot, stroke = dot:FindFirstChildOfClass("UIStroke"),
-            scale = dot:FindFirstChildOfClass("UIScale"), name = name }
-    end
-
-    -- stat tiles
-    local stats = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 50),
-        LayoutOrder = 4, Parent = body },
-        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
-    el.sMoney = UI.stat(stats, "Money", 1)
-    el.sIncome = UI.stat(stats, "Income/s", 2)
-    el.sRolls = UI.stat(stats, "Rolls/min", 3)
-    el.sUnits = UI.stat(stats, "Units", 4)
-
-    -- tower + log
-    local info = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 52),
-        LayoutOrder = 5, Parent = body }, { UI.corner(8), UI.new("UIStroke", { Color = TH.Stroke }) })
-    el.tower = UI.label("", 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(10, 6),
-        Size = UDim2.new(1, -20, 0, 18), Parent = info })
-    el.log = UI.label("", 11, TH.Text, TH.Mono, { Position = UDim2.fromOffset(10, 27),
-        Size = UDim2.new(1, -20, 0, 18), Parent = info })
-
-    -- controls
-    local chips = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26),
-        LayoutOrder = 6, Parent = body },
-        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
-    UI.chip(chips, "Farm", function()
-        return S.farm
-    end, function()
-        S.farm = not S.farm
-        UI.toast(S.farm and "Farm on" or "Farm paused", S.farm and "Good" or "Bad")
-    end, 1)
-    UI.chip(chips, "Tower", function()
-        return S.towerOn
-    end, function()
-        S.towerOn = not S.towerOn
-        UI.toast(S.towerOn and "Towers on" or "Towers off", S.towerOn and "Good" or "Bad")
-    end, 2)
-    UI.chip(chips, "Chain", function()
-        return S.chainOn
-    end, function()
-        S.chainOn = not S.chainOn
-        UI.toast(S.chainOn and "Chain on" or "Chain off", S.chainOn and "Good" or "Bad")
-    end, 3)
-    UI.chip(chips, "Sell now", nil, function()
-        SYS.sell(true)
-        UI.toast(S.lastSell ~= "" and S.lastSell or "nothing to sell", "Good")
-    end, 4)
-
-    -- open animation
-    el.card.BackgroundTransparency = 1
-    UI.tween(el.card, MOTION.Slow, { BackgroundTransparency = 0 })
-    UI.tween(el.scale, MOTION.Spring, { Scale = 1 })
-
+    el.win.BackgroundTransparency = 1
+    UI.tween(el.win, MOTION.Slow, { BackgroundTransparency = 0 })
+    UI.tween(el.scale, MOTION.Spring, { Scale = UI.fitScale() })
+    UI.track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+        UI.tween(el.scale, MOTION.Base, { Scale = UI.fitScale() })
+    end))
+    task.defer(function()
+        UI.select("Status")
+    end)
     UI.track(UserInputService.InputBegan:Connect(function(input, gp)
         if not gp and input.KeyCode == Enum.KeyCode.RightControl then
             UI.visible = not UI.visible
             UI.gui.Enabled = UI.visible
         end
     end))
-
     UI.track(RunService.Heartbeat:Connect(UI.frame))
 end
 
+-- ── Status page ─────────────────────────────────────────────
+function UI.buildStatus(page)
+    local el = UI.el
+    UI.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+    local hero = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 96), LayoutOrder = 1, Parent = page },
+        { UI.corner(12), UI.stroke() })
+    el.orb = UI.new("Frame", { Position = UDim2.fromOffset(20, 24), Size = UDim2.fromOffset(48, 48), BackgroundTransparency = 1, Parent = hero })
+    el.ring = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1, Parent = el.orb }, { UI.corner(), UI.new("UIScale", {}) })
+    el.ringStroke = UI.new("UIStroke", { Thickness = 2, Color = TH.Dim, Parent = el.ring })
+    el.ringScale = el.ring:FindFirstChildOfClass("UIScale")
+    el.halo = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(30, 30),
+        BackgroundTransparency = 0.8, BackgroundColor3 = TH.Dim, Parent = el.orb }, { UI.corner() })
+    el.core = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(18, 18),
+        BackgroundColor3 = TH.Dim, Parent = el.orb }, { UI.corner() })
+    el.title = UI.label("…", 22, TH.Text, TH.Bold, { Position = UDim2.fromOffset(86, 14), Size = UDim2.new(1, -100, 0, 28), Parent = hero })
+    el.detail = UI.label("", 13, TH.Sub, TH.Font, { Position = UDim2.fromOffset(86, 44), Size = UDim2.new(1, -100, 0, 18), Parent = hero })
+    el.msg = UI.label("", 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(86, 66), Size = UDim2.new(1, -100, 0, 16), Parent = hero })
+
+    -- goal bar
+    local bar = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 52), LayoutOrder = 2, Parent = page },
+        { UI.corner(10), UI.stroke() })
+    el.barLabel = UI.label("GOAL", 10, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(0.7, 0, 0, 12), Parent = bar })
+    el.barValue = UI.label("0%", 11, TH.Text, TH.Bold, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 8),
+        Size = UDim2.new(0.3, 0, 0, 14), TextXAlignment = Enum.TextXAlignment.Right, Parent = bar })
+    local track = UI.new("Frame", { BackgroundColor3 = TH.Elevated, Position = UDim2.fromOffset(14, 30), Size = UDim2.new(1, -28, 0, 8),
+        ClipsDescendants = true, Parent = bar }, { UI.corner() })
+    el.fill = UI.new("Frame", { Size = UDim2.fromScale(0.02, 1), BackgroundColor3 = TH.Accent, Parent = track }, { UI.corner() })
+    el.shine = UI.new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(0.45, 0), NumberSequenceKeypoint.new(0.5, 0.65), NumberSequenceKeypoint.new(0.55, 0),
+        NumberSequenceKeypoint.new(1, 0) }), Offset = Vector2.new(-1, 0), Parent = el.fill })
+    UI.tween(el.shine, TweenInfo.new(1.6, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Offset = Vector2.new(1, 0) })
+
+    -- chain track
+    local chainRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 58), LayoutOrder = 3, Parent = page },
+        { UI.corner(10), UI.stroke() })
+    el.chainRow = chainRow
+    el.line = UI.new("Frame", { BackgroundColor3 = TH.Stroke, BorderSizePixel = 0, Position = UDim2.new(0.1, 0, 0, 17),
+        Size = UDim2.new(0.8, 0, 0, 2), Parent = chainRow })
+    el.lineDone = UI.new("Frame", { BackgroundColor3 = TH.Good, BorderSizePixel = 0, Size = UDim2.fromScale(0, 1), Parent = el.line })
+    for i = 1, 5 do
+        local x = 0.1 + (i - 1) * 0.2
+        local dot = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(x, 0, 0, 11), Size = UDim2.fromOffset(14, 14),
+            BackgroundColor3 = TH.Elevated, Parent = chainRow }, { UI.corner(), UI.new("UIStroke", { Color = TH.Stroke }), UI.new("UIScale", {}) })
+        local name = UI.label("", 10, TH.Dim, TH.Font, { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(x, 0, 0, 31),
+            Size = UDim2.fromOffset(90, 14), TextXAlignment = Enum.TextXAlignment.Center, Parent = chainRow })
+        UI.nodes[i] = { dot = dot, stroke = dot:FindFirstChildOfClass("UIStroke"), scale = dot:FindFirstChildOfClass("UIScale"), name = name }
+    end
+
+    -- stats
+    local stats = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 58), LayoutOrder = 4, Parent = page },
+        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
+            SortOrder = Enum.SortOrder.LayoutOrder }) })
+    el.sMoney = UI.stat(stats, "Money")
+    el.sIncome = UI.stat(stats, "Income / s")
+    el.sRolls = UI.stat(stats, "Rolls / min")
+    el.sUnits = UI.stat(stats, "Units")
+
+    -- tower + log
+    local info = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 104), LayoutOrder = 5, Parent = page },
+        { UI.corner(10), UI.stroke(), UI.pad(10) })
+    el.tower = UI.label("", 11, TH.Sub, TH.Bold, { Size = UDim2.new(1, 0, 0, 16), Parent = info })
+    el.logLines = {}
+    for i = 1, 4 do
+        el.logLines[i] = UI.label("", 11, TH.Sub, TH.Mono, { Position = UDim2.fromOffset(0, 6 + i * 17), Size = UDim2.new(1, 0, 0, 15), Parent = info })
+    end
+end
+
+-- ── Goal page ───────────────────────────────────────────────
+function UI.goalRow(parent, order, title, getOn, onToggle)
+    local row = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = order, Parent = parent },
+        { UI.corner(10), UI.stroke() })
+    local tg = UI.toggle(row, title, getOn, onToggle)
+    tg.row.BackgroundTransparency = 1
+    tg.row.Size = UDim2.new(0.5, 0, 1, 0)
+    tg.row:FindFirstChildOfClass("UIStroke").Enabled = false
+    return row, tg
+end
+
+function UI.buildGoal(page)
+    local el = UI.el
+    UI.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+    el.goalSummary = UI.label("", 13, TH.Text, TH.Bold, { Size = UDim2.new(1, 0, 0, 20), LayoutOrder = 0, Parent = page })
+
+    -- rebirth: toggle + stepper
+    local rRow
+    rRow, el.gRebirthToggle = UI.goalRow(page, 1, "Need rebirth", function()
+        return G.needRebirth
+    end, function(v)
+        G.needRebirth = v
+        GL.save()
+        UI.paintGoal()
+    end)
+    local function step(text, x, delta)
+        local b = UI.new("TextButton", { AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, x, 0.5, 0),
+            Size = UDim2.fromOffset(26, 26), BackgroundColor3 = TH.Accent, Text = text, TextSize = 15, Font = TH.Bold,
+            TextColor3 = TH.Text, Parent = rRow }, { UI.corner() })
+        UI.press(b)
+        UI.track(b.Activated:Connect(function()
+            G.rebirth = math.clamp(G.rebirth + delta, 1, S.maxRebirth)
+            GL.save()
+            UI.paintGoal()
+        end))
+    end
+    step("+", -12, 1)
+    el.gRebirth = UI.label("", 13, TH.Text, TH.Bold, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -44, 0.5, 0),
+        Size = UDim2.fromOffset(110, 26), TextXAlignment = Enum.TextXAlignment.Center, Parent = rRow })
+    step("–", -160, -1)
+
+    -- skill tree: toggle + give-up minutes
+    local uRow
+    uRow, el.gUpgToggle = UI.goalRow(page, 2, "Need full skill tree", function()
+        return G.needUpgrades
+    end, function(v)
+        G.needUpgrades = v
+        GL.save()
+        UI.paintGoal()
+    end)
+    UI.label("give up after", 11, TH.Sub, TH.Font, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -96, 0.5, 0),
+        Size = UDim2.fromOffset(90, 26), TextXAlignment = Enum.TextXAlignment.Right, Parent = uRow })
+    el.gGiveUp = UI.new("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(76, 26),
+        BackgroundColor3 = TH.Bg, Text = "", TextSize = 12, Font = TH.Bold, TextColor3 = TH.Text, ClearTextOnFocus = true, Parent = uRow },
+        { UI.corner(6) })
+    UI.track(el.gGiveUp.FocusLost:Connect(function()
+        local n = tonumber((string.gsub(el.gGiveUp.Text, "%D", "")))
+        G.giveUp = n and math.clamp(n, 0, 600) or 0
+        GL.save()
+        UI.paintGoal()
+    end))
+
+    -- dice: toggle + picker grid (every dice, game images)
+    local dRow
+    dRow, el.gDiceToggle = UI.goalRow(page, 3, "Need dice", function()
+        return G.needDice
+    end, function(v)
+        G.needDice = v
+        GL.save()
+        UI.paintGoal()
+    end)
+    el.gDiceName = UI.label("", 13, TH.Text, TH.Bold, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0),
+        Size = UDim2.fromOffset(300, 26), TextXAlignment = Enum.TextXAlignment.Right, Parent = dRow })
+    el.diceGrid = UI.scroller(page, { Size = UDim2.new(1, 0, 1, -210), LayoutOrder = 4 })
+    UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(98, 112), CellPadding = UDim2.fromOffset(8, 8),
+        SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.diceGrid })
+    UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8), Parent = el.diceGrid })
+    for i, d in ipairs(UI.diceList()) do
+        local f = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Panel, LayoutOrder = i,
+            Parent = el.diceGrid }, { UI.corner(10), UI.new("UIScale", {}) })
+        local st = UI.stroke(TH.Stroke)
+        st.Parent = f
+        local img = UI.new("ImageLabel", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 8),
+            Size = UDim2.fromOffset(58, 58), Image = d.cfg.image or "", Parent = f })
+        local okR, r = pcall(function()
+            return M.Rarities.Get(d.cfg.rarity)
+        end)
+        if okR and r and r.gradient then
+            UI.new("UIGradient", { Color = r.gradient, Parent = img })
+        end
+        UI.label(d.name, 11, TH.Text, TH.Bold, { Position = UDim2.fromOffset(4, 70), Size = UDim2.new(1, -8, 0, 14),
+            TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
+        local sub = UI.label(d.price > 0 and ("$" .. H.fmt(d.price)) or "free", 10, TH.Sub, TH.Font, { Position = UDim2.fromOffset(4, 86),
+            Size = UDim2.new(1, -8, 0, 14), TextXAlignment = Enum.TextXAlignment.Center, Parent = f })
+        local tick = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -5, 0, 5), Size = UDim2.fromOffset(20, 20),
+            BackgroundColor3 = TH.Accent, Text = "✓", TextSize = 12, Font = TH.Bold, TextColor3 = TH.Text, Visible = false, Parent = f },
+            { UI.corner() })
+        local owned = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0), Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(8, 8),
+            BackgroundColor3 = TH.Good, Visible = false, Parent = f }, { UI.corner() })
+        UI.diceTiles[d.name] = { frame = f, stroke = st, tick = tick, owned = owned, sub = sub }
+        UI.press(f)
+        UI.track(f.Activated:Connect(function()
+            G.dice = d.name
+            G.needDice = true
+            GL.save()
+            UI.paintGoal()
+            UI.toast("Goal dice: " .. d.name, "Good")
+        end))
+    end
+    UI.paintGoal()
+end
+
+function UI.paintGoal()
+    local el = UI.el
+    if not el.gRebirth then
+        return
+    end
+    el.gRebirth.Text = "Rebirth " .. G.rebirth .. " / " .. S.maxRebirth
+    el.gRebirth.TextColor3 = G.needRebirth and TH.Text or TH.Dim
+    el.gGiveUp.Text = G.giveUp > 0 and (G.giveUp .. " min") or "never"
+    el.gDiceName.Text = (G.needDice and "Target: " or "(off) ") .. tostring(G.dice)
+    el.gDiceName.TextColor3 = G.needDice and TH.Text or TH.Dim
+    el.gRebirthToggle.paint()
+    el.gUpgToggle.paint()
+    el.gDiceToggle.paint()
+    local owned = D.OwnedDice() or {}
+    for name, t in pairs(UI.diceTiles) do
+        local on = name == G.dice
+        t.tick.Visible = on and G.needDice
+        t.owned.Visible = owned[name] == true or name == D.Dice()
+        UI.tween(t.stroke, MOTION.Base, { Color = (on and G.needDice) and TH.Accent or TH.Stroke })
+        t.stroke.Thickness = (on and G.needDice) and 2 or 1
+        t.frame.BackgroundTransparency = (G.needDice or on) and 0 or 0.4
+    end
+    local parts = {}
+    if G.needDice then
+        table.insert(parts, "owns " .. tostring(G.dice))
+    end
+    if G.needRebirth then
+        table.insert(parts, "rebirth " .. G.rebirth)
+    end
+    if G.needUpgrades then
+        table.insert(parts, "full skill tree" .. (G.giveUp > 0 and (" (or stuck " .. G.giveUp .. " min)") or ""))
+    end
+    el.goalSummary.Text = #parts > 0 and ("Maxed when: " .. table.concat(parts, "  +  "))
+        or "No goal set - the builder sends right away"
+    el.goalSummary.TextColor3 = #parts > 0 and TH.Text or TH.Warn
+end
+
+-- ── Chain page ──────────────────────────────────────────────
+function UI.buildChain(page)
+    local el = UI.el
+    UI.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+    el.chainHead = UI.label("", 13, TH.Text, TH.Bold, { Size = UDim2.new(1, 0, 0, 20), LayoutOrder = 1, Parent = page })
+    el.chainList = UI.scroller(page, { Size = UDim2.new(1, 0, 1, -30), LayoutOrder = 2 })
+    UI.new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.chainList })
+    for i, name in ipairs(CFG.Chain.Order) do
+        local f = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, -6, 0, 50), LayoutOrder = i, Parent = el.chainList },
+            { UI.corner(10) })
+        local st = UI.stroke(TH.Stroke)
+        st.Parent = f
+        UI.label("#" .. i, 12, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(12, 0), Size = UDim2.fromOffset(34, 50), Parent = f })
+        local av = UI.avatar(f, 34, { Position = UDim2.fromOffset(48, 8) })
+        UI.label(name, 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(92, 8), Size = UDim2.new(1, -300, 0, 18), Parent = f })
+        local info = UI.label("", 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(92, 26), Size = UDim2.new(1, -300, 0, 14), Parent = f })
+        local pill = UI.chip(f, "OFFLINE", TH.Dim, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0) })
+        UI.chainRows[i] = { name = name, frame = f, stroke = st, avatar = av, info = info, pill = pill, avatarSet = false }
+        table.insert(UI.idQueue, i)
+    end
+    -- avatars: resolve user ids one by one in the background
+    task.spawn(function()
+        while alive() and #UI.idQueue > 0 do
+            local i = table.remove(UI.idQueue, 1)
+            local r = UI.chainRows[i]
+            if r then
+                local ok, id = pcall(Players.GetUserIdFromNameAsync, Players, r.name)
+                if ok and id then
+                    r.userId = id
+                    r.avatar.set(id, TH.Stroke)
+                    r.info.Text = "ID " .. id
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+end
+
+function UI.refreshChain()
+    local el = UI.el
+    local order = CFG.Chain.Order
+    local bi = S.chain.builderIdx
+    local done = 0
+    for i, r in ipairs(UI.chainRows) do
+        local st = CH.read(r.name)
+        local isMe = string.lower(r.name) == string.lower(LP.Name)
+        local label, color
+        if st and st.phase == "done" then
+            label, color = "DONE", TH.Good
+            done = done + 1
+        elseif not CH.fresh(st) and not isMe then
+            label, color = "OFFLINE", TH.Dim
+        elseif i == bi then
+            label, color = (st and st.phase == "send") and "SENDING" or "BUILDING", TH.Accent
+        elseif st and st.phase == "host" then
+            label, color = "RECEIVING", TH.Warn
+        else
+            label, color = "QUEUE", TH.Sub
+        end
+        if r.pill.Text ~= label then
+            r.pill.Text = label
+            r.pill.TextColor3 = color
+            r.pill.BackgroundColor3 = color
+            UI.tween(r.stroke, MOTION.Base, { Color = color:Lerp(TH.Stroke, 0.55) })
+            r.avatar.ring.Color = color
+        end
+        r.frame.BackgroundColor3 = isMe and TH.Elevated or TH.Panel
+    end
+    el.chainHead.Text = #order == 0 and "Chain.Order is empty - fill it in the loader config"
+        or (done .. " / " .. #order .. " done" .. (bi and ("  ·  building: #" .. bi .. " " .. tostring(order[bi])) or ""))
+end
+
+-- ── Farm page ───────────────────────────────────────────────
+function UI.buildFarm(page)
+    local el = UI.el
+    UI.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+    UI.section(page, "Running on this screen", 1)
+    el.tFarm = UI.toggle(page, "Farm (roll · collect · buy · rebirth · sell)", function()
+        return S.farm
+    end, function(v)
+        S.farm = v
+    end, 2)
+    el.tTower = UI.toggle(page, "Towers", function()
+        return S.towerOn
+    end, function(v)
+        S.towerOn = v
+    end, 3)
+    el.tChain = UI.toggle(page, "Chain build (trade units to the next account)", function()
+        return S.chainOn
+    end, function(v)
+        S.chainOn = v
+    end, 4)
+    el.tLevel = UI.toggle(page, "Level up placed units (pays back within 10 min)", function()
+        return CFG.Farm.LevelUnits
+    end, function(v)
+        CFG.Farm.LevelUnits = v
+    end, 5)
+    el.tItems = UI.toggle(page, "Drink every potion + use Lucky Spin", function()
+        return CFG.Farm.AutoItems
+    end, function(v)
+        CFG.Farm.AutoItems = v
+    end, 6)
+    UI.section(page, "Selling (shared by every screen)", 7)
+    local sellRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = 8, Parent = page },
+        { UI.corner(8), UI.stroke() })
+    UI.label("Keep units earning at least  (0 = sell all not placed · e.g. 1qd, 5t, 1e15)", 12, TH.Text, TH.Font,
+        { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -150, 1, 0), Parent = sellRow })
+    el.keepBox = UI.new("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(120, 28),
+        BackgroundColor3 = TH.Bg, Text = "", TextSize = 13, Font = TH.Bold, TextColor3 = TH.Text, ClearTextOnFocus = true, Parent = sellRow },
+        { UI.corner(6) })
+    UI.track(el.keepBox.FocusLost:Connect(function()
+        local txt = string.lower((string.gsub(el.keepBox.Text, "%s", "")))
+        local n = tonumber(txt)
+        if not n then
+            local ok, v = pcall(M.NF.ParseCompact, txt)
+            n = ok and v or nil
+        end
+        if n and n >= 0 then
+            CFG.Sell.KeepIncomeAbove = n
+            G.keepIncome = n
+            GL.save()
+            UI.toast(n > 0 and ("Keeping units ≥ $" .. H.fmt(n) .. "/s") or "Selling every unit not placed", "Good")
+        else
+            UI.toast("not a number - use 1qd, 5t or 1e15", "Bad")
+        end
+        UI.paintFarm()
+    end))
+    local actions = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), LayoutOrder = 9, Parent = page })
+    UI.button(actions, "Sell overflow now", TH.Accent, { Size = UDim2.new(0.5, -4, 1, 0) }, function()
+        SYS.sell(true)
+        UI.toast(S.lastSell ~= "" and S.lastSell or "nothing to sell", "Good")
+    end)
+    UI.button(actions, "Re-redeem codes", TH.Panel, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
+        Size = UDim2.new(0.5, -4, 1, 0) }, function()
+        S.codesDone = false
+        SYS.rewards()
+        UI.toast("codes sent", "Good")
+    end)
+    UI.paintFarm()
+end
+
+function UI.paintFarm()
+    local el = UI.el
+    if not el.keepBox then
+        return
+    end
+    local v = tonumber(CFG.Sell.KeepIncomeAbove) or 0
+    if not el.keepBox:IsFocused() then
+        el.keepBox.Text = v > 0 and H.fmt(v) or "0"
+    end
+end
+
+-- ── live updates ────────────────────────────────────────────
 function UI.setPhase(key)
     local ph = PHASES[key] or PHASES.FARM
     local el = UI.el
     UI.phase = key
     el.title.Text = ph.title
     el.title.TextTransparency = 1
-    el.title.Position = UDim2.fromOffset(78, 18)
-    UI.tween(el.title, MOTION.Slow, { TextTransparency = 0, Position = UDim2.fromOffset(78, 10) })
+    el.title.Position = UDim2.fromOffset(86, 22)
+    UI.tween(el.title, MOTION.Slow, { TextTransparency = 0, Position = UDim2.fromOffset(86, 14) })
     UI.tween(el.core, MOTION.Base, { BackgroundColor3 = ph.color })
     UI.tween(el.halo, MOTION.Base, { BackgroundColor3 = ph.color })
     UI.tween(el.fill, MOTION.Base, { BackgroundColor3 = ph.color })
+    UI.tween(el.sideDot, MOTION.Base, { BackgroundColor3 = ph.color })
     el.ringStroke.Color = ph.color
-    el.sweep.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, TH.Stroke),
-        ColorSequenceKeypoint.new(0.5, ph.color),
-        ColorSequenceKeypoint.new(1, TH.Stroke),
-    })
+    el.sidePhase.Text = ph.title
+    el.sidePhase.TextColor3 = ph.color
+    el.sweep.Color = ColorSequence.new({ ColorSequenceKeypoint.new(0, TH.Stroke), ColorSequenceKeypoint.new(0.5, ph.color),
+        ColorSequenceKeypoint.new(1, TH.Stroke) })
     if key == "SUCCESS" then
         UI.burst(ph.color)
         UI.toast("Success! units handed over", "Good")
     end
 end
 
--- per frame: orb pulse, border sweep, active chain node breathing
+function UI.refreshStatus()
+    local el = UI.el
+    local key = UI.phaseKey()
+    if key ~= UI.phase then
+        UI.setPhase(key)
+    end
+    local ch = S.chain
+    local order = CFG.Chain.Order
+    el.badge.Text = (S.chainOn and ch.myIndex) and ("#" .. ch.myIndex .. " / " .. #order) or LP.Name
+    el.detail.Text = UI.activity()
+    el.msg.Text = tostring(ch.msg or "")
+    local frac, right = UI.goal(key)
+    el.barLabel.Text = (key == "QUEUE" or key == "JOIN") and "CHAIN TURN" or "GOAL"
+    el.barValue.Text = right
+    if UI.lastFrac ~= frac then
+        UI.lastFrac = frac
+        UI.tween(el.fill, MOTION.Slow, { Size = UDim2.fromScale(math.max(frac, 0.02), 1) })
+    end
+    -- chain track
+    local me = ch.myIndex
+    el.chainRow.Visible = S.chainOn and me ~= nil
+    if me then
+        local first = math.clamp(me - 2, 1, math.max(1, #order - 4))
+        local bi = ch.builderIdx or me
+        UI.activeNode = nil
+        local doneCount = 0
+        for i = 1, 5 do
+            local idx = first + i - 1
+            local n = UI.nodes[i]
+            local name = order[idx]
+            n.dot.Visible = name ~= nil
+            n.name.Visible = name ~= nil
+            if name then
+                n.name.Text = (idx == me and "you" or string.sub(name, 1, 10))
+                n.name.TextColor3 = idx == me and TH.Text or TH.Dim
+                local color = TH.Elevated
+                if (ch.done and idx == me) or idx < bi then
+                    color = TH.Good
+                    doneCount = i
+                elseif idx == bi then
+                    color = (PHASES[key] or PHASES.BUILD).color
+                    UI.activeNode = n
+                end
+                n.dot.BackgroundColor3 = color
+                n.stroke.Color = idx == me and TH.Text or TH.Stroke
+                n.stroke.Thickness = idx == me and 2 or 1
+                if UI.activeNode ~= n then
+                    n.scale.Scale = 1
+                end
+            end
+        end
+        el.lineDone.Size = UDim2.fromScale(math.clamp((doneCount - 0.5) / 4, 0, 1), 1)
+    end
+    local count, cap = H.storage()
+    el.sMoney.Text = "$" .. H.fmt(D.Money())
+    el.sIncome.Text = H.fmt(H.incomePerSec())
+    el.sRolls.Text = tostring(SYS.rollsPerMin())
+    el.sUnits.Text = count .. "/" .. cap
+    el.sUnits.TextColor3 = (cap - count < CFG.Sell.FreeSlots) and TH.Warn or TH.Text
+    local tw = S.tower
+    el.tower.Text = S.towerOn and string.format("TOWER   %s · floor %d (sim %d) · runs %d", tw.name, tw.floor, tw.predicted, tw.runs)
+        or "TOWER   off"
+    for i = 1, 4 do
+        local l = S.logLines[i]
+        el.logLines[i].Text = l and ("› " .. l.text) or ""
+        el.logLines[i].TextColor3 = l and (l.kind == "Bad" and TH.Bad or (l.kind == "Good" and TH.Good or TH.Sub)) or TH.Sub
+    end
+end
+
 function UI.frame(dt)
     if not UI.gui or not UI.gui.Parent then
         UI.destroy()
@@ -2698,144 +3234,34 @@ function UI.frame(dt)
     if UI.activeNode then
         UI.activeNode.scale.Scale = 1 + math.sin(t * 4) * 0.12
     end
-    if os.clock() >= UI.refreshAt then
-        UI.refreshAt = os.clock() + 0.5
-        local ok, err = pcall(UI.refresh)
-        if not ok then
-            UI.refreshErr = (UI.refreshErr or 0) + 1
-            if UI.refreshErr % 20 == 1 then
-                log("ui error: " .. tostring(err), "Bad")
-            end
-        end
-    end
-end
-
-function UI.refresh()
-    local el = UI.el
-    local key = UI.phaseKey()
-    if key ~= UI.phase then
-        UI.setPhase(key)
-    end
-    local ch = S.chain
-    local order = CFG.Chain.Order
-
-    -- header badge: position in chain
-    el.badge.Text = (S.chainOn and ch.myIndex) and ("#" .. ch.myIndex .. " / " .. #order) or LP.Name
-
-    -- detail line under the title
-    local detail
-    if key == "BUILD" or key == "FARM" then
-        detail = string.gsub(string.gsub(UI.activity(), "^Build %(", ""), "%)$", "")
-        if key == "FARM" then
-            detail = "Rebirth " .. D.Rebirth() .. "/" .. S.rebirthTarget .. " · Dice " .. tostring(D.Dice())
-        end
-    elseif key == "WAIT" then
-        detail = (ch.role == "builder" and "→ " or "← ") .. tostring(ch.target)
-    elseif key == "JOIN" then
-        detail = "→ " .. tostring(ch.target) .. "'s server"
-    elseif key == "TRADE" then
-        detail = "with " .. tostring(ch.target) .. " · " .. tostring(T.phase)
-    elseif key == "SUCCESS" then
-        detail = (string.gsub(ch.msg, "^DONE · ", ""))
-    elseif key == "QUEUE" then
-        detail = "builder " .. tostring(ch.builderName or "?")
-    else
-        detail = "farm paused"
-    end
-    el.detail.Text = detail
-    el.msg.Text = tostring(ch.msg or "")
-
-    -- goal bar
-    local frac, right = UI.goal(key)
-    el.barLabel.Text = (key == "QUEUE" or key == "JOIN") and "CHAIN TURN" or "GOAL"
-    el.barValue.Text = right
-    if UI.lastFrac ~= frac then
-        UI.lastFrac = frac
-        UI.tween(el.fill, MOTION.Slow, { Size = UDim2.fromScale(math.max(frac, 0.02), 1) })
-    end
-
-    -- chain track
-    local me = ch.myIndex
-    el.chainRow.Visible = S.chainOn and me ~= nil
-    if me then
-        local first = math.clamp(me - 2, 1, math.max(1, #order - 4))
-        local bi = ch.builderIdx or me
-        UI.activeNode = nil
-        local doneCount = 0
-        for i = 1, 5 do
-            local idx = first + i - 1
-            local n = UI.nodes[i]
-            local name = order[idx]
-            n.dot.Visible = name ~= nil
-            n.name.Visible = name ~= nil
-            if name then
-                n.name.Text = (idx == me and "you" or string.sub(name, 1, 8))
-                n.name.TextColor3 = idx == me and TH.Text or TH.Dim
-                local color, strokeColor = TH.Elevated, TH.Stroke
-                if ch.done and idx == me then
-                    color = TH.Good
-                elseif idx < bi then
-                    color = TH.Good
-                    doneCount = i
-                elseif idx == bi then
-                    color = (PHASES[key] or PHASES.BUILD).color
-                    UI.activeNode = n
+    if t >= UI.refreshAt then
+        UI.refreshAt = t + 0.5
+        local ok, err = pcall(function()
+            UI.refreshStatus()
+            if (UI.goalAt or 0) < t then
+                UI.goalAt = t + 3
+                if GL.load() then
+                    log("goal updated from another screen")
                 end
-                if idx == me then
-                    strokeColor = TH.Text
+                if UI.tab and UI.tab.name == "Goal" then
+                    UI.paintGoal()
                 end
-                n.dot.BackgroundColor3 = color
-                n.stroke.Color = strokeColor
-                n.stroke.Thickness = idx == me and 2 or 1
-                if UI.activeNode ~= n then
-                    n.scale.Scale = 1
+                if UI.tab and UI.tab.name == "Farm" then
+                    UI.paintFarm()
+                    for _, k in ipairs({ "tFarm", "tTower", "tChain", "tLevel", "tItems" }) do
+                        el[k].paint()
+                    end
                 end
             end
-        end
-        el.lineDone.Size = UDim2.fromScale(math.clamp((doneCount - 0.5) / 4, 0, 1), 1)
-    end
-
-    -- stats
-    local count, cap = H.storage()
-    el.sMoney.Text = "$" .. H.fmt(D.Money())
-    el.sIncome.Text = H.fmt(H.incomePerSec())
-    el.sRolls.Text = tostring(SYS.rollsPerMin())
-    el.sUnits.Text = count .. "/" .. cap
-    el.sUnits.TextColor3 = (cap - count < CFG.Sell.FreeSlots) and PHASES.WAIT.color or TH.Text
-
-    -- tower + newest log line (typed out when it changes)
-    local tw = S.tower
-    el.tower.Text = S.towerOn and string.format("TOWER  %s · floor %d (sim %d) · runs %d",
-        tw.name, tw.floor, tw.predicted, tw.runs) or "TOWER  off"
-    local newest = S.logLines[1]
-    if newest and newest.text ~= UI.lastLog then
-        UI.lastLog = newest.text
-        el.log.Text = "› " .. newest.text
-        el.log.TextColor3 = newest.kind == "Bad" and TH.Bad or (newest.kind == "Good" and TH.Good or TH.Text)
-        el.log.MaxVisibleGraphemes = 0
-        task.spawn(function()
-            local total = utf8.len(el.log.Text) or #el.log.Text
-            for i = 1, total do
-                if el.log.Text ~= "› " .. newest.text then
-                    return
-                end
-                el.log.MaxVisibleGraphemes = i
-                task.wait(0.012)
+            if UI.tab and UI.tab.name == "Chain" and (UI.chainAt or 0) < t then
+                UI.chainAt = t + 2
+                UI.refreshChain()
             end
-            el.log.MaxVisibleGraphemes = -1
         end)
-    end
-
-    -- chips
-    for _, c in ipairs(UI.chips) do
-        if c.getOn then
-            local on = c.getOn() and true or false
-            if on ~= c.last then
-                c.last = on
-                UI.tween(c.button, MOTION.Base, {
-                    BackgroundColor3 = on and (PHASES.BUILD.color) or TH.Elevated,
-                    TextColor3 = on and TH.Text or TH.Sub,
-                })
+        if not ok then
+            UI.err = (UI.err or 0) + 1
+            if UI.err % 20 == 1 then
+                log("ui error: " .. tostring(err), "Bad")
             end
         end
     end
@@ -2857,9 +3283,8 @@ function UI.destroy()
     end
 end
 
-
 -- what this account is doing right now, in one readable line for the account manager:
---   Build (Dice Genesis → Skeleton)      still building; lists only what Chain.MaxedWhen needs
+--   Build (Dice Genesis → Skeleton)      still building; lists only what the Goal tab needs
 --   Waiting for Trade → <next>           maxed, waiting for the next account to arrive / trade
 --   Trading with <name>                   trade window is open
 --   Success! sent to <next>               finished (sent once by CH.afterDone, then Done)
@@ -2878,15 +3303,14 @@ function UI.activity()
             end
             return "Waiting for Trade → " .. tostring(ch.target)
         end
-        local need = H.set(CFG.Chain.MaxedWhen)
         local parts = {}
-        if need.Dice then
-            table.insert(parts, "Dice " .. tostring(D.Dice()) .. " → " .. tostring(S.topDice))
+        if G.needDice then
+            table.insert(parts, "Dice " .. tostring(D.Dice()) .. " → " .. tostring(G.dice))
         end
-        if need.Rebirth then
-            table.insert(parts, "Rebirth " .. D.Rebirth() .. "/" .. S.rebirthTarget)
+        if G.needRebirth then
+            table.insert(parts, "Rebirth " .. D.Rebirth() .. "/" .. G.rebirth)
         end
-        if need.Upgrades then
+        if G.needUpgrades then
             table.insert(parts, "Upgrades " .. H.upgradesOwned() .. "/" .. S.upgradeTotal)
         end
         return "Build (" .. table.concat(parts, ", ") .. ")"
@@ -2945,6 +3369,9 @@ task.spawn(SYS.economyLoop)
 task.spawn(SYS.towerLoop)
 task.spawn(SYS.slowLoop)
 task.spawn(CH.loop)
+if GL.load() then
+    log("goal loaded from " .. GL.path)
+end
 do
     local ok, err = pcall(UI.build)
     if not ok then
