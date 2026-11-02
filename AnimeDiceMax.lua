@@ -30,7 +30,7 @@ local CONFIG_DEFAULTS = {
         UpgradeGiveUpMin = 0,
         LeaveWhenDone = true,
     },
-    Trade = { HostHop = true, FreeSlots = 1, WaitAfterJoin = 180 },
+    Trade = { HostHop = true, FreeSlots = 1, WaitAfterJoin = 10 },
     Manager = "Auto",
 }
 
@@ -583,7 +583,8 @@ end
 local GL = { path = "AnimeDice/max_goal.json", seenRev = -1 }
 
 function GL.save()
-    G.rev = os.time() + math.random()
+    -- whole number: a fraction does not survive the JSON round trip and every screen would reload forever
+    G.rev = os.time() * 1000 + math.random(0, 999)
     GL.seenRev = G.rev
     if not writefile then
         return
@@ -614,7 +615,7 @@ function GL.load()
     local ok, data = pcall(function()
         return HttpService:JSONDecode(readfile(GL.path))
     end)
-    if not ok or type(data) ~= "table" or data.rev == GL.seenRev then
+    if not ok or type(data) ~= "table" or tostring(data.rev) == tostring(GL.seenRev) then
         return false
     end
     GL.seenRev = data.rev
@@ -1966,6 +1967,7 @@ function CH.tick()
     local order = CFG.Chain.Order
     local me = S.chain.myIndex
     S.pauseRoll = false
+    S.chain.tradeAt = nil
     CH.write()
     if S.chain.done then
         return
@@ -2042,6 +2044,7 @@ function CH.tick()
         local theirWait = CFG.Trade.WaitAfterJoin - (os.time() - (st.joinedAt or 0))
         local waitLeft = math.max(myWait, theirWait)
         if waitLeft > 0 then
+            S.chain.tradeAt = os.time() + waitLeft
             S.chain.msg = "same server · trading in " .. waitLeft .. "s"
             return
         end
@@ -3111,6 +3114,12 @@ function UI.refreshStatus()
     local key = UI.phaseKey()
     if key ~= UI.phase then
         UI.setPhase(key)
+    end
+    -- countdown in the title while both accounts sit in the same server
+    local cd = S.chain.tradeAt and (S.chain.tradeAt - os.time())
+    local title = (cd and cd > 0) and ("TRADE IN " .. cd .. "s") or (PHASES[key] or PHASES.FARM).title
+    if el.title.Text ~= title then
+        el.title.Text = title
     end
     local ch = S.chain
     local order = CFG.Chain.Order
