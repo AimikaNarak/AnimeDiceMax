@@ -2356,11 +2356,16 @@ function UI.button(parent, text, color, props, onClick)
     end
     UI.press(b)
     local base = b.BackgroundColor3
+    UI.new("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(196, 200, 216)), Parent = b })
+    local edge = UI.stroke(base:Lerp(Color3.new(1, 1, 1), 0.2), 0.55)
+    edge.Parent = b
     UI.track(b.MouseEnter:Connect(function()
-        UI.tween(b, MOTION.Fast, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.08) })
+        UI.tween(b, MOTION.Fast, { BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.1) })
+        UI.tween(edge, MOTION.Fast, { Transparency = 0, Color = base == TH.Panel and TH.Accent or base:Lerp(Color3.new(1, 1, 1), 0.45) })
     end))
     UI.track(b.MouseLeave:Connect(function()
         UI.tween(b, MOTION.Fast, { BackgroundColor3 = base })
+        UI.tween(edge, MOTION.Fast, { Transparency = 0.55, Color = base:Lerp(Color3.new(1, 1, 1), 0.2) })
     end))
     UI.track(b.Activated:Connect(function()
         task.spawn(function()
@@ -3354,17 +3359,22 @@ function UI.goalCard(parent, order, title, getOn, onToggle)
 end
 
 function UI.smallButton(parent, text, props, fn)
-    local b = UI.new("TextButton", { AutoButtonColor = false, Size = UDim2.fromOffset(26, 26), BackgroundColor3 = TH.Elevated,
-        Text = text, TextSize = 14, Font = TH.Bold, TextColor3 = TH.Text, ZIndex = 3, Parent = parent }, { UI.corner(7) })
+    local b = UI.new("TextButton", { AutoButtonColor = false, Size = UDim2.fromOffset(28, 28), BackgroundColor3 = TH.Elevated,
+        Text = text, TextSize = 14, Font = TH.Bold, TextColor3 = TH.Sub, ZIndex = 3, Parent = parent }, { UI.corner(8),
+        UI.new("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(190, 194, 210)) }) })
+    local edge = UI.stroke(TH.Stroke)
+    edge.Parent = b
     for k, v in pairs(props or {}) do
         b[k] = v
     end
     UI.press(b)
     UI.track(b.MouseEnter:Connect(function()
-        UI.tween(b, MOTION.Fast, { BackgroundColor3 = TH.Accent })
+        UI.tween(b, MOTION.Fast, { BackgroundColor3 = TH.Accent, TextColor3 = TH.Text })
+        UI.tween(edge, MOTION.Fast, { Color = TH.Accent:Lerp(Color3.new(1, 1, 1), 0.4) })
     end))
     UI.track(b.MouseLeave:Connect(function()
-        UI.tween(b, MOTION.Fast, { BackgroundColor3 = TH.Elevated })
+        UI.tween(b, MOTION.Fast, { BackgroundColor3 = TH.Elevated, TextColor3 = TH.Sub })
+        UI.tween(edge, MOTION.Fast, { Color = TH.Stroke })
     end))
     UI.track(b.Activated:Connect(fn))
     return b
@@ -3385,15 +3395,16 @@ function UI.buildGoal(page)
         UI.paintGoal()
     end)
     local function rebStep(text, x, delta)
-        UI.smallButton(el.gReb.card, text, { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, x, 1, -10) }, function()
+        UI.smallButton(el.gReb.card, text, { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, x, 1, -10),
+            Size = UDim2.fromOffset(text == "MAX" and 48 or 28, 28), TextSize = text == "MAX" and 11 or 15 }, function()
             G.rebirth = math.clamp(G.rebirth + delta, 1, S.maxRebirth)
             UI.save()
             UI.paintGoal()
         end)
     end
     rebStep("–", 14, -1)
-    rebStep("+", 46, 1)
-    rebStep("max", 78, 999)
+    rebStep("+", 48, 1)
+    rebStep("MAX", 82, 999)
 
     -- skill tree
     el.gUpg = UI.goalCard(cards, 2, "Skill tree", function()
@@ -3462,8 +3473,12 @@ function UI.diceCard(parent, d, order)
         { UI.new("UIGradient", { Color = grad }) })
     local img = UI.new("ImageLabel", { BackgroundTransparency = 1, Image = d.cfg.image or "", AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(68, 68), Parent = well }, { UI.new("UIScale", {}) })
-    local owned = UI.new("TextLabel", { Position = UDim2.fromOffset(5, 5), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = TH.Good,
-        Text = "✓", TextSize = 12, Font = TH.Bold, TextColor3 = TH.Bg, Visible = false, ZIndex = 3, Parent = well }, { UI.corner() })
+    local owned = UI.new("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.5, Size = UDim2.fromScale(1, 1),
+        Visible = false, ZIndex = 4, Parent = well }, { UI.corner(10) })
+    local tick = UI.new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(52, 52),
+        BackgroundColor3 = TH.Good, Text = "✓", TextSize = 32, Font = TH.Bold, TextColor3 = Color3.new(1, 1, 1), ZIndex = 5, Parent = owned },
+        { UI.corner(), UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 3, Transparency = 0.2 }), UI.new("UIScale", {}),
+          UI.new("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(170, 200, 180)) }) })
     local check = UI.chip(well, "TARGET", TH.Accent, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -5, 0, 5), Visible = false,
         ZIndex = 3, BackgroundTransparency = 0.1, TextColor3 = TH.Text, TextSize = 10, Size = UDim2.fromOffset(0, 18) })
     UI.label(d.name, 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(6, 104), Size = UDim2.new(1, -12, 0, 15),
@@ -3492,7 +3507,8 @@ function UI.diceCard(parent, d, order)
         UI.tween(sc, MOTION.Spring, { Scale = 1 })
         UI.toast("Goal dice: " .. d.name, "Good")
     end))
-    UI.diceTiles[d.name] = { stroke = st, check = check, owned = owned, ray = ray, frame = f }
+    UI.diceTiles[d.name] = { stroke = st, check = check, owned = owned, tickScale = tick:FindFirstChildOfClass("UIScale"), ray = ray, frame = f,
+        wasOwned = false }
 end
 
 function UI.buildDiceCards()
@@ -3533,7 +3549,13 @@ function UI.paintGoal()
     for name, t in pairs(UI.diceTiles) do
         local on = name == G.dice and G.needDice
         t.check.Visible = on
-        t.owned.Visible = owned[name] == true or name == D.Dice()
+        local isOwned = owned[name] == true or name == D.Dice()
+        t.owned.Visible = isOwned
+        if isOwned and not t.wasOwned then
+            t.tickScale.Scale = 0.2
+            UI.tween(t.tickScale, MOTION.Spring, { Scale = 1 })
+        end
+        t.wasOwned = isOwned
         t.stroke.Color = on and TH.Accent or TH.Stroke
         t.stroke.Thickness = on and 2 or 1
         if on then
@@ -3557,48 +3579,55 @@ end
 -- ── Potions page: one row per potion type, click a tier to drink it or skip it ──
 function UI.buildPotions(page)
     local el = UI.el
-    local top = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36), Parent = page },
-        { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
-    UI.button(top, "All on", TH.Accent, { Size = UDim2.fromOffset(74, 36), LayoutOrder = 1 }, function()
-        G.potionOff = {}
-        UI.save()
-        UI.paintPotions()
-    end)
-    UI.button(top, "All off", TH.Panel, { Size = UDim2.fromOffset(74, 36), LayoutOrder = 2, TextColor3 = TH.Bad }, function()
-        for _, p in ipairs(UI.potionList()) do
-            G.potionOff[p.name] = true
-        end
-        UI.save()
-        UI.paintPotions()
-    end)
-    for i, tier in ipairs({ "I", "II", "III", "IV" }) do
-        UI.button(top, "Tier " .. tier, TH.Panel, { Size = UDim2.fromOffset(66, 36), LayoutOrder = 2 + i }, function()
-            local anyOn = false
-            for _, p in ipairs(UI.potionList()) do
-                if p.tierName == tier and not G.potionOff[p.name] then
-                    anyOn = true
-                end
-            end
-            for _, p in ipairs(UI.potionList()) do
-                if p.tierName == tier then
-                    G.potionOff[p.name] = anyOn or nil
-                end
-            end
-            UI.save()
-            UI.paintPotions()
-            UI.toast("Tier " .. tier .. (anyOn and " skipped" or " on"), anyOn and "Bad" or "Good")
-        end)
-    end
-    local spinHolder = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(150, 36), LayoutOrder = 9, Parent = top })
-    el.spinToggle = UI.toggle(spinHolder, "Lucky Spin", function()
-        return G.spins
+    local top = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), Parent = page })
+    UI.potFilter = "All"
+    el.potSeg = UI.segmented(top, { "All", "I", "II", "III", "IV" }, function()
+        return UI.potFilter
     end, function(v)
-        G.spins = v
-        UI.save()
+        UI.potFilter = v
+        el.potSeg.paint()
+        UI.paintPotions()
+    end, { Size = UDim2.fromOffset(5 * 58 + 6, 40) }, 58)
+    UI.label("TIER", 10, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(5 * 58 + 18, 0), Size = UDim2.fromOffset(40, 40), Parent = top })
+
+    -- Lucky Spin: a coloured card with the game's spin icon and a switch
+    local spin = UI.new("TextButton", { AutoButtonColor = false, Text = "", AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0),
+        Size = UDim2.fromOffset(214, 40), BackgroundColor3 = Color3.new(1, 1, 1), Parent = top }, { UI.corner(12), UI.new("UIScale", {}) })
+    el.spinGrad = UI.new("UIGradient", { Rotation = 0, Parent = spin })
+    el.spinEdge = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Transparency = 0.6, Thickness = 1.5, Parent = spin })
+    local spinImg = ""
+    pcall(function()
+        spinImg = M.Entry.getEntryConfig("Lucky Spin").image or ""
     end)
-    el.spinToggle.row.Size = UDim2.fromScale(1, 1)
-    el.potSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(0, 44), Size = UDim2.new(1, 0, 0, 18), Parent = page })
-    el.potList = UI.scroller(page, { Position = UDim2.fromOffset(0, 68), Size = UDim2.new(1, 0, 1, -68) })
+    UI.new("ImageLabel", { BackgroundTransparency = 1, Image = spinImg, Position = UDim2.fromOffset(6, 2), Size = UDim2.fromOffset(36, 36), Parent = spin })
+    UI.label("Lucky Spin", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(48, 4), Size = UDim2.fromOffset(110, 18),
+        TextStrokeTransparency = 0.6, Parent = spin })
+    el.spinState = UI.label("", 10, TH.Text, TH.Bold, { Position = UDim2.fromOffset(48, 21), Size = UDim2.fromOffset(110, 14),
+        TextTransparency = 0.25, Parent = spin })
+    local track = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(40, 22),
+        BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.55, Parent = spin }, { UI.corner() })
+    local knob = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), Size = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = Color3.new(1, 1, 1), Parent = track }, { UI.corner() })
+    local spinScale = spin:FindFirstChildOfClass("UIScale")
+    el.spinToggle = { paint = function()
+        local on = G.spins
+        el.spinGrad.Color = on and ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 92, 170)),
+            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(190, 110, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(90, 140, 255)) })
+            or ColorSequence.new(TH.Elevated, TH.Panel)
+        el.spinState.Text = on and "ON · used when no spin is running" or "OFF"
+        UI.tween(knob, MOTION.Spring, { Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) })
+        UI.tween(track, MOTION.Base, { BackgroundTransparency = on and 0.35 or 0.55 })
+    end }
+    UI.track(spin.Activated:Connect(function()
+        G.spins = not G.spins
+        UI.save()
+        el.spinToggle.paint()
+        spinScale.Scale = 0.95
+        UI.tween(spinScale, MOTION.Spring, { Scale = 1 })
+    end))
+    el.spinToggle.paint()
+    el.potSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 0, 18), Parent = page })
+    el.potList = UI.scroller(page, { Position = UDim2.fromOffset(0, 72), Size = UDim2.new(1, 0, 1, -72) })
     UI.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = el.potList })
     UI.potTiles = {}
     UI.potRows = {}
@@ -3640,7 +3669,7 @@ function UI.buildPotions(page)
             AutomaticSize = Enum.AutomaticSize.Y, Parent = sec },
             { UI.new("UIGridLayout", { CellSize = UDim2.fromOffset(122, 146), CellPadding = UDim2.fromOffset(9, 9),
                 SortOrder = Enum.SortOrder.LayoutOrder }) })
-        UI.potRows[gi] = { info = info, list = list }
+        UI.potRows[gi] = { info = info, list = list, sec = sec, tierName = list[1].tierName }
         for ti, p in ipairs(list) do
             local t = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Bg, LayoutOrder = ti, Parent = grid },
                 { UI.corner(12), UI.new("UIScale", {}) })
@@ -3667,6 +3696,12 @@ function UI.buildPotions(page)
                 TextXAlignment = Enum.TextXAlignment.Center, Parent = t })
             UI.potTiles[p.name] = { frame = t, stroke = st, shade = shade, tier = tier, state = state, count = count }
             local sc = t:FindFirstChildOfClass("UIScale")
+            UI.track(t.MouseEnter:Connect(function()
+                UI.tween(st, MOTION.Fast, { Color = TH.Accent })
+            end))
+            UI.track(t.MouseLeave:Connect(function()
+                UI.tween(st, MOTION.Fast, { Color = TH.Stroke })
+            end))
             UI.track(t.Activated:Connect(function()
                 G.potionOff[p.name] = (not G.potionOff[p.name]) or nil
                 UI.save()
@@ -3704,7 +3739,6 @@ function UI.paintPotions()
         t.count.BackgroundColor3 = have > 0 and TH.Good or TH.Dim
         t.state.Text = enabled and "DRINK" or "SKIP"
         t.state.TextColor3 = enabled and TH.Good or TH.Bad
-        UI.tween(t.stroke, MOTION.Base, { Color = enabled and TH.Good:Lerp(TH.Stroke, 0.35) or TH.Stroke })
         t.shade.Visible = not enabled
         t.tier.TextColor3 = enabled and TH.Text or TH.Dim
     end
@@ -3717,6 +3751,7 @@ function UI.paintPotions()
         end
         r.info.Text = n .. " / " .. #r.list .. " on"
         r.info.TextColor3 = n > 0 and TH.Good or TH.Dim
+        r.sec.Visible = UI.potFilter == "All" or UI.potFilter == r.tierName
     end
     if UI.el.spinToggle then
         UI.el.spinToggle.paint()
@@ -3783,31 +3818,32 @@ function UI.buildTower(page)
         return a.order < b.order
     end)
     for i, tw in ipairs(list) do
-        local f = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Bg, ClipsDescendants = true,
-            LayoutOrder = i, Parent = el.tList }, { UI.corner(12), UI.new("UIScale", {}) })
+        local f = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundTransparency = 1, LayoutOrder = i, Parent = el.tList },
+            { UI.corner(12), UI.new("UIScale", {}) })
+        local cg = UI.new("CanvasGroup", { BackgroundColor3 = TH.Bg, Size = UDim2.fromScale(1, 1), Parent = f }, { UI.corner(12) })
         -- the art fills the card; a dark fade on the left keeps the text readable
         local art = UI.new("ImageLabel", { BackgroundTransparency = 1, Image = tw.cfg.image or "", ScaleType = Enum.ScaleType.Crop,
-            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Parent = f },
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Parent = cg },
             { UI.corner(12), UI.new("UIScale", {}) })
-        UI.new("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), Parent = f },
+        UI.new("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), Parent = cg },
             { UI.corner(12), UI.new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.05),
                 NumberSequenceKeypoint.new(0.55, 0.45), NumberSequenceKeypoint.new(1, 0.85) }) }) })
         local diffName = tw.cfg.difficulty and tw.cfg.difficulty.name or ""
         local dc = DIFF_COLOR[diffName] or TH.Sub
         UI.label(tw.name, 17, TH.Text, TH.Bold, { Position = UDim2.fromOffset(14, 14), Size = UDim2.new(1, -110, 0, 22),
-            TextStrokeTransparency = 0.5, Parent = f })
-        UI.chip(f, tostring(diffName ~= "" and diffName or (tw.cfg.event and "Event" or "Tower")), dc,
+            TextStrokeTransparency = 0.5, Parent = cg })
+        UI.chip(cg, tostring(diffName ~= "" and diffName or (tw.cfg.event and "Event" or "Tower")), dc,
             { Position = UDim2.fromOffset(14, 42), BackgroundTransparency = 0.55, TextColor3 = TH.Text })
         UI.label(tw.cfg.maxFloors and (tw.cfg.maxFloors .. " floors") or "endless", 11, TH.Sub, TH.Bold,
-            { Position = UDim2.fromOffset(14, 66), Size = UDim2.fromOffset(160, 14), TextStrokeTransparency = 0.6, Parent = f })
+            { Position = UDim2.fromOffset(14, 66), Size = UDim2.fromOffset(160, 14), TextStrokeTransparency = 0.6, Parent = cg })
         local sim = UI.label("", 12, TH.Good, TH.Bold, { Position = UDim2.fromOffset(14, 92), Size = UDim2.new(1, -28, 0, 16),
-            TextStrokeTransparency = 0.5, Parent = f })
+            TextStrokeTransparency = 0.5, Parent = cg })
         local barBg = UI.new("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.5, AnchorPoint = Vector2.new(0, 1),
-            Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(1, 0, 0, 4), BorderSizePixel = 0, Parent = f })
+            Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(1, 0, 0, 3), BorderSizePixel = 0, Parent = cg })
         local bar = UI.new("Frame", { BackgroundColor3 = TH.Good, BorderSizePixel = 0, Size = UDim2.fromScale(0, 1), Parent = barBg })
-        local pill = UI.chip(f, "", TH.Dim, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 12), BackgroundTransparency = 0.25,
+        local pill = UI.chip(cg, "", TH.Dim, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 12), BackgroundTransparency = 0.25,
             TextColor3 = TH.Text })
-        local now = UI.chip(f, "● RUNNING", TH.Warn, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 38), Visible = false,
+        local now = UI.chip(cg, "● RUNNING", TH.Warn, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 38), Visible = false,
             BackgroundTransparency = 0.25, TextColor3 = TH.Text })
         local stroke = UI.new("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2, Transparency = 0.85, Parent = f })
         local glow = UI.new("UIGradient", { Parent = stroke })
@@ -3902,6 +3938,7 @@ end
 -- ── Skill Tree page: the game's tree, click tiles to require them ──
 local TREE_OWNED_BG = "rbxassetid://121829442861416"   -- from UpgradeController (owned tile)
 local TREE_OPEN_BG = "rbxassetid://118987660331960"    -- from UpgradeController (available tile)
+local TREE_HEX_R = 96    -- tile hex is 1.2 x 150 = 180 px wide (Upgrades.Screen.Template, dump 2026-11-02)
 
 function UI.isRequired(name)
     if not G.upgrades or #G.upgrades == 0 then
@@ -4041,7 +4078,7 @@ function UI.buildTreeTiles()
             local len = math.sqrt(dx * dx + dy * dy)
             local line = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, BackgroundColor3 = TH.Stroke,
                 Position = UDim2.new(0.5, (p.X.Offset + pp.X.Offset) / 2, 0.5, (p.Y.Offset + pp.Y.Offset) / 2),
-                Size = UDim2.fromOffset(len, 10), Rotation = math.deg(math.atan2(dy, dx)), Parent = canvas }, { UI.corner() })
+                Size = UDim2.fromOffset(len, 10), Rotation = math.deg(math.atan2(dy, dx)), ZIndex = 1, Parent = canvas }, { UI.corner() })
             UI.treeTiles[name .. "#line"] = { line = line, name = name }
         end
     end
@@ -4049,6 +4086,16 @@ function UI.buildTreeTiles()
         local up = M.Upgrades[name]
         local tile
         local okTpl = false
+        -- hexagon outline behind the tile (pointy-top, like the game's hex): six rounded edges
+        local glow = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5), Position = p,
+            Size = UDim2.fromOffset(2, 2), ZIndex = 2, Parent = canvas })
+        for k = 0, 5 do
+            local ang = math.rad(k * 60)
+            UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, BackgroundColor3 = Color3.fromRGB(80, 255, 130),
+                Position = UDim2.new(0.5, math.cos(ang) * TREE_HEX_R * 0.866, 0.5, math.sin(ang) * TREE_HEX_R * 0.866),
+                Size = UDim2.fromOffset(TREE_HEX_R + 8, 10), Rotation = k * 60 + 90, ZIndex = 2, Parent = glow }, { UI.corner() })
+        end
+
         if tpl then
             okTpl = pcall(function()
                 local t = tpl:Clone()
@@ -4072,13 +4119,14 @@ function UI.buildTreeTiles()
                     end
                 end
                 t.BackgroundTransparency = 1
+                t.ZIndex = 3
                 t.Parent = canvas
                 tile = { root = t, bg = Tile, price = Tile.Price }
             end)
         end
         if not okTpl then
             local t = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = p, Size = UDim2.fromOffset(110, 110),
-                BackgroundColor3 = TH.Elevated, Parent = canvas }, { UI.corner(16) })
+                BackgroundColor3 = TH.Elevated, ZIndex = 3, Parent = canvas }, { UI.corner(16) })
             UI.new("ImageLabel", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 10),
                 Size = UDim2.fromOffset(60, 60), Image = up.image or "", Parent = t })
             UI.label(name, 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(4, 76), Size = UDim2.new(1, -8, 0, 28),
@@ -4086,10 +4134,9 @@ function UI.buildTreeTiles()
             tile = { root = t }
         end
         -- overlay: required ring + check, click to toggle
-        local ring = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = p, Size = UDim2.fromOffset(124, 124),
-            BackgroundTransparency = 1, ZIndex = 30, Parent = canvas }, { UI.corner(20) })
-        local ringStroke = UI.new("UIStroke", { Color = TH.Good, Thickness = 4, Parent = ring })
-        local check = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 4, 0, -4), Size = UDim2.fromOffset(30, 30),
+        local ring = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = p, Size = UDim2.fromOffset(150, 150),
+            BackgroundTransparency = 1, ZIndex = 30, Parent = canvas })
+        local check = UI.new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 4), Size = UDim2.fromOffset(32, 32),
             BackgroundColor3 = TH.Good, Text = "✓", TextSize = 18, Font = TH.Bold, TextColor3 = TH.Bg, ZIndex = 31, Parent = ring },
             { UI.corner() })
         local hit = UI.new("TextButton", { BackgroundTransparency = 1, Text = "", Size = UDim2.fromScale(1, 1), ZIndex = 32, Parent = ring })
@@ -4118,7 +4165,7 @@ function UI.buildTreeTiles()
             UI.save()
             UI.paintTree()
         end))
-        tile.ring = ringStroke
+        tile.ring = glow
         tile.check = check
         UI.treeTiles[name] = tile
     end
@@ -4147,7 +4194,7 @@ function UI.paintTree()
                     t.price.Visible = not owned[name] and name ~= "Start"
                 end)
             end
-            t.ring.Transparency = req and 0 or 1
+            t.ring.Visible = req
             t.check.Visible = req
         end
     end
