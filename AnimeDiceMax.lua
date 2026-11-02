@@ -2491,11 +2491,16 @@ function UI.chip(parent, text, color, props)
     return c
 end
 
-function UI.toggle(parent, text, getOn, onChange, order)
+function UI.toggle(parent, text, getOn, onChange, order, desc)
     local row = UI.new("TextButton", { AutoButtonColor = false, Text = "", BackgroundColor3 = TH.Panel,
-        Size = UDim2.new(1, 0, 0, 38), LayoutOrder = order, Parent = parent }, { UI.corner(8), UI.stroke() })
-    UI.label(text, 13, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -70, 1, 0),
-        Parent = row })
+        Size = UDim2.new(1, 0, 0, desc and 52 or 38), LayoutOrder = order, Parent = parent }, { UI.corner(desc and 10 or 8), UI.stroke() })
+    if desc then
+        UI.label(text, 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -80, 0, 16), Parent = row })
+        UI.label(desc, 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -80, 0, 14), Parent = row })
+    else
+        UI.label(text, 13, TH.Text, TH.Font, { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -70, 1, 0),
+            Parent = row })
+    end
     local track = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
         Size = UDim2.fromOffset(38, 20), BackgroundColor3 = TH.Elevated, Parent = row }, { UI.corner() })
     local knob = UI.new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
@@ -2837,10 +2842,10 @@ function UI.buildStatus(page)
     el.heroTag = UI.chip(el.orb, "YOU", TH.Accent, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 1, -6),
         BackgroundTransparency = 0, TextColor3 = TH.Text, ZIndex = 4 })
 
-    el.title = UI.label("…", 22, TH.Text, TH.Bold, { Position = UDim2.fromOffset(136, 18), Size = UDim2.new(1, -400, 0, 28), Parent = hero })
-    el.heroName = UI.label("", 14, TH.Text, TH.Bold, { Position = UDim2.fromOffset(136, 48), Size = UDim2.new(1, -400, 0, 18), Parent = hero })
-    el.detail = UI.label("", 12, TH.Sub, TH.Font, { Position = UDim2.fromOffset(136, 70), Size = UDim2.new(1, -400, 0, 16), Parent = hero })
-    el.msg = UI.label("", 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(136, 88), Size = UDim2.new(1, -400, 0, 14), Parent = hero })
+    el.title = UI.label("…", 22, TH.Text, TH.Bold, { Position = UDim2.fromOffset(136, 18), Size = UDim2.new(1, -370, 0, 28), Parent = hero })
+    el.heroName = UI.label("", 14, TH.Text, TH.Bold, { Position = UDim2.fromOffset(136, 48), Size = UDim2.new(1, -370, 0, 18), Parent = hero })
+    el.detail = UI.label("", 12, TH.Sub, TH.Font, { Position = UDim2.fromOffset(136, 70), Size = UDim2.new(1, -370, 0, 16), Parent = hero })
+    el.msg = UI.label("", 11, TH.Dim, TH.Font, { Position = UDim2.fromOffset(136, 88), Size = UDim2.new(1, -370, 0, 14), Parent = hero })
     local chips = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(136, 110), Size = UDim2.new(1, -400, 0, 22),
         Parent = hero }, { UI.new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
         SortOrder = Enum.SortOrder.LayoutOrder }) })
@@ -2848,23 +2853,38 @@ function UI.buildStatus(page)
     el.hRebirth = UI.chip(chips, "", TH.Purple, { LayoutOrder = 2 })
     el.hUnits = UI.chip(chips, "", TH.Accent, { LayoutOrder = 3 })
 
-    -- flow arrow + next account
-    local nextBox = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 14), Size = UDim2.fromOffset(250, 122),
-        BackgroundColor3 = TH.Bg, Parent = hero }, { UI.corner(10), UI.stroke() })
-    el.nextBox = nextBox
-    local flow = UI.new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 46), Size = UDim2.fromOffset(60, 20),
-        ClipsDescendants = true, Parent = nextBox })
+    -- flow dots → square "next up" card
+    local flow = UI.new("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -170, 0.5, 0),
+        Size = UDim2.fromOffset(54, 20), ClipsDescendants = true, Parent = hero })
     el.flow = {}
     for i = 1, 4 do
         el.flow[i] = UI.new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(7, 7),
             BackgroundColor3 = TH.Accent, Parent = flow }, { UI.corner() })
     end
-    UI.label("›", 22, TH.Sub, TH.Bold, { Position = UDim2.fromOffset(62, 40), Size = UDim2.fromOffset(12, 30), Parent = nextBox })
-    el.nextAv = UI.avatar(nextBox, 56, { Position = UDim2.fromOffset(80, 28) })
-    UI.label("NEXT UP", 10, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(146, 22), Size = UDim2.fromOffset(96, 12), Parent = nextBox })
-    el.nextName = UI.label("-", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(146, 38), Size = UDim2.fromOffset(98, 18), Parent = nextBox })
-    el.nextInfo = UI.label("", 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(146, 58), Size = UDim2.fromOffset(98, 14), Parent = nextBox })
-    el.queueChip = UI.chip(nextBox, "", TH.Warn, { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -10) })
+    local nextBox = UI.new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 14), Size = UDim2.fromOffset(148, 122),
+        BackgroundColor3 = TH.Bg, Parent = hero }, { UI.corner(12), UI.stroke() })
+    el.nextBox = nextBox
+    UI.label("NEXT UP", 10, TH.Dim, TH.Bold, { Position = UDim2.fromOffset(0, 8), Size = UDim2.new(1, 0, 0, 12),
+        TextXAlignment = Enum.TextXAlignment.Center, Parent = nextBox })
+    el.nextAv = UI.avatar(nextBox, 50, { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 24) })
+    for _, c in ipairs(el.nextAv.holder:GetDescendants()) do
+        if c:IsA("UICorner") then
+            c.CornerRadius = UDim.new(0, 12)
+        end
+    end
+    for _, c in ipairs(el.nextAv.holder:GetChildren()) do
+        if c:IsA("UICorner") then
+            c.CornerRadius = UDim.new(0, 12)
+        end
+    end
+    el.nextEmpty = UI.label("—", 20, TH.Dim, TH.Bold, { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = el.nextAv.holder })
+    el.nextName = UI.label("-", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(6, 78), Size = UDim2.new(1, -12, 0, 15),
+        TextXAlignment = Enum.TextXAlignment.Center, Parent = nextBox })
+    el.nextInfo = UI.label("", 10, TH.Sub, TH.Font, { Position = UDim2.fromOffset(6, 92), Size = UDim2.new(1, -12, 0, 12),
+        TextXAlignment = Enum.TextXAlignment.Center, Visible = false, Parent = nextBox })
+    el.queueChip = UI.chip(nextBox, "", TH.Warn, { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -7), TextSize = 10,
+        Size = UDim2.fromOffset(0, 18) })
 
     -- goal bar
     local bar = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 52), LayoutOrder = 2, Parent = page },
@@ -2991,10 +3011,13 @@ function UI.refreshHero()
 
     -- next account
     local nextName = cc and cc.nextIdx and order[cc.nextIdx] or nil
+    el.nextEmpty.Visible = nextName == nil
     if not chainOn then
         el.nextName.Text = "Chain off"
         el.nextInfo.Text = "farming only"
-        el.queueChip.Text = "solo"
+        el.queueChip.Text = "farming only"
+        el.queueChip.TextColor3 = TH.Sub
+        el.queueChip.BackgroundColor3 = TH.Sub
     elseif not cc.bi then
         el.nextName.Text = "Finished"
         el.nextInfo.Text = "whole chain DONE"
@@ -3002,10 +3025,10 @@ function UI.refreshHero()
         el.queueChip.TextColor3 = TH.Good
         el.queueChip.BackgroundColor3 = TH.Good
     else
-        el.nextName.Text = nextName or "last one"
+        el.nextName.Text = (S.chain.myIndex and cc.nextIdx == S.chain.myIndex) and "YOU are next" or (nextName or "last one")
         local me = S.chain.myIndex
         el.nextInfo.Text = (me and cc.nextIdx == me) and "that's you!" or (nextName and ("#" .. cc.nextIdx) or "no one after")
-        el.queueChip.Text = cc.left .. " left in queue · " .. cc.nDone .. " done"
+        el.queueChip.Text = cc.left .. " left · " .. cc.nDone .. " done"
         el.queueChip.TextColor3 = TH.Warn
         el.queueChip.BackgroundColor3 = TH.Warn
     end
@@ -3756,7 +3779,7 @@ function UI.paintPotions()
     if UI.el.spinToggle then
         UI.el.spinToggle.paint()
     end
-    UI.el.potSummary.Text = on .. " / " .. total .. " potions will be drunk" .. (CFG.Farm.AutoItems and "" or "  (Auto items is OFF in Farm)")
+    UI.el.potSummary.Text = on .. " / " .. total .. " potions will be drunk" .. (CFG.Farm.AutoItems and "" or "  (Use potions is OFF in Farm)")
     UI.el.potSummary.TextColor3 = CFG.Farm.AutoItems and TH.Text or TH.Warn
 end
 
@@ -4508,26 +4531,26 @@ function UI.buildFarm(page)
     local el = UI.el
     UI.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
     UI.section(page, "Running on this screen", 1)
-    el.tFarm = UI.toggle(page, "Farm (roll · collect · buy · rebirth · sell)", function()
+    el.tFarm = UI.toggle(page, "Farm", function()
         return S.farm
     end, function(v)
         S.farm = v
-    end, 2)
-    el.tChain = UI.toggle(page, "Chain build (trade units to the next account)", function()
+    end, 2, "roll · collect money · buy dice and upgrades · rebirth · sell overflow")
+    el.tChain = UI.toggle(page, "Chain build", function()
         return S.chainOn
     end, function(v)
         S.chainOn = v
-    end, 3)
-    el.tLevel = UI.toggle(page, "Level up placed units (pays back within 10 min)", function()
+    end, 3, "when maxed, trade the money units to the next account in the Chain tab")
+    el.tLevel = UI.toggle(page, "Level up placed units", function()
         return CFG.Farm.LevelUnits
     end, function(v)
         CFG.Farm.LevelUnits = v
-    end, 4)
-    el.tItems = UI.toggle(page, "Auto items (potions picked in the Potions tab + Lucky Spin)", function()
+    end, 4, "only levels that pay for themselves within 10 minutes")
+    el.tItems = UI.toggle(page, "Use potions", function()
         return CFG.Farm.AutoItems
     end, function(v)
         CFG.Farm.AutoItems = v
-    end, 5)
+    end, 5, "drinks the potions ticked in the Potions tab (Lucky Spin has its own switch there)")
     UI.section(page, "Selling (shared by every screen)", 6)
     local sellRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = 7, Parent = page },
         { UI.corner(8), UI.stroke() })
