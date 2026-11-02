@@ -572,6 +572,11 @@ local G = { needDice = false, dice = S.topDice, needRebirth = false, rebirth = S
     potionOff = {},          -- [boost name] = true → never drink it
     spins = true,            -- use Lucky Spin
     freeSlots = nil,         -- Farm tab: sell when fewer slots than this are free
+    run = nil,               -- Farm tab switches { farm, chain, level, items, towers }
+    manager = nil,           -- "Auto" | "None" | "Storm" | "Masterp" | "Horst"
+    tradeWait = nil,         -- seconds between the receiver joining and the trade
+    hostHop = nil,           -- holder moves to an emptier server when its server is full
+    leaveDone = nil,         -- leave the game when done (only without a manager)
     tower = nil }            -- { pick, only = {...}, infinity }
 do
     local need = H.set(CFG.Chain.MaxedWhen)
@@ -645,6 +650,44 @@ function GL.load()
         G.freeSlots = math.clamp(math.floor(data.freeSlots), 1, 500)
         CFG.Sell.FreeSlots = G.freeSlots
     end
+    if type(data.run) == "table" then
+        local r = data.run
+        G.run = r
+        -- a DONE account stays stopped whatever the other screens say
+        if not S.chain.done then
+            if type(r.farm) == "boolean" then
+                S.farm = r.farm
+            end
+            if type(r.towers) == "boolean" then
+                S.towerOn = r.towers
+            end
+        end
+        if type(r.chain) == "boolean" then
+            S.chainOn = r.chain
+        end
+        if type(r.level) == "boolean" then
+            CFG.Farm.LevelUnits = r.level
+        end
+        if type(r.items) == "boolean" then
+            CFG.Farm.AutoItems = r.items
+        end
+    end
+    if type(data.manager) == "string" then
+        G.manager = data.manager
+        CFG.Manager = data.manager
+    end
+    if type(data.tradeWait) == "number" then
+        G.tradeWait = math.clamp(math.floor(data.tradeWait), 0, 600)
+        CFG.Trade.WaitAfterJoin = G.tradeWait
+    end
+    if type(data.hostHop) == "boolean" then
+        G.hostHop = data.hostHop
+        CFG.Trade.HostHop = data.hostHop
+    end
+    if type(data.leaveDone) == "boolean" then
+        G.leaveDone = data.leaveDone
+        CFG.Chain.LeaveWhenDone = data.leaveDone
+    end
     G.potionOff = type(data.potionOff) == "table" and data.potionOff or {}
     G.spins = data.spins ~= false
     if type(data.tower) == "table" then
@@ -659,8 +702,12 @@ end
 
 -- copy the current runtime values into G (before the first save from the window)
 function GL.capture()
-    G.order = G.order or table.clone(CFG.Chain.Order)
-    G.units = G.units or table.clone(CFG.Chain.Units)
+    if not G.order and #CFG.Chain.Order > 0 then
+        G.order = table.clone(CFG.Chain.Order)
+    end
+    if not G.units and #CFG.Chain.Units > 0 then
+        G.units = table.clone(CFG.Chain.Units)
+    end
     G.tower = G.tower or { pick = CFG.Tower.Pick, only = table.clone(CFG.Tower.Only), infinity = CFG.Tower.Infinity }
 end
 
@@ -3835,6 +3882,7 @@ function UI.buildTower(page)
         return S.towerOn
     end, function(v)
         S.towerOn = v
+        UI.saveRun()
     end)
     el.tOn.row.Size = UDim2.fromScale(1, 1)
     el.tSummary = UI.label("", 12, TH.Text, TH.Bold, { Position = UDim2.fromOffset(0, 44), Size = UDim2.new(1, 0, 0, 18), Parent = page })
@@ -4536,29 +4584,40 @@ function UI.potionList()
 end
 
 -- ── Farm page ───────────────────────────────────────────────
-function UI.buildFarm(page)
+-- Farm-tab switches go to the shared file so every screen follows (like the Trade Hub plan)
+function UI.saveRun()
+    G.run = { farm = S.farm, chain = S.chainOn, level = CFG.Farm.LevelUnits, items = CFG.Farm.AutoItems, towers = S.towerOn }
+    UI.save()
+end
+
+function UI.buildFarm(root)
     local el = UI.el
+    local page = UI.scroller(root, { Size = UDim2.fromScale(1, 1) })
     UI.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
-    UI.section(page, "Running on this screen", 1)
+    UI.section(page, "Running (shared by every screen)", 1)
     el.tFarm = UI.toggle(page, "Farm", function()
         return S.farm
     end, function(v)
         S.farm = v
+        UI.saveRun()
     end, 2, "roll · collect money · buy dice and upgrades · rebirth · sell overflow")
     el.tChain = UI.toggle(page, "Chain build", function()
         return S.chainOn
     end, function(v)
         S.chainOn = v
+        UI.saveRun()
     end, 3, "when maxed, trade the money units to the next account in the Chain tab")
     el.tLevel = UI.toggle(page, "Level up placed units", function()
         return CFG.Farm.LevelUnits
     end, function(v)
         CFG.Farm.LevelUnits = v
+        UI.saveRun()
     end, 4, "only levels that pay for themselves within 10 minutes")
     el.tItems = UI.toggle(page, "Use potions", function()
         return CFG.Farm.AutoItems
     end, function(v)
         CFG.Farm.AutoItems = v
+        UI.saveRun()
     end, 5, "drinks the potions ticked in the Potions tab (Lucky Spin has its own switch there)")
     UI.section(page, "Selling (shared by every screen)", 6)
     local sellRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = 7, Parent = page },
@@ -4620,6 +4679,75 @@ function UI.buildFarm(page)
             UI.paintFarm()
         end
     end))
+    -- account manager + trade (same idea as the Trade Hub's Run page)
+    UI.section(page, "Account manager & trade (shared by every screen)", 10)
+    local mgrRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 56), LayoutOrder = 11, Parent = page },
+        { UI.corner(10), UI.stroke() })
+    UI.label("When an account is DONE, mark it finished in", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(14, 10),
+        Size = UDim2.new(1, -360, 0, 16), Parent = mgrRow })
+    el.mgrInfo = UI.label("", 11, TH.Sub, TH.Font, { Position = UDim2.fromOffset(14, 29), Size = UDim2.new(1, -360, 0, 14), Parent = mgrRow })
+    el.mgrSeg = UI.segmented(mgrRow, { "Auto", "None", "Storm", "Masterp", "Horst" }, function()
+        local m = string.lower(tostring(CFG.Manager or "Auto"))
+        for _, k in ipairs({ "None", "Storm", "Masterp", "Horst" }) do
+            if string.lower(k) == m then
+                return k
+            end
+        end
+        return "Auto"
+    end, function(v)
+        CFG.Manager = v
+        G.manager = v
+        MGR.storm = nil
+        MGR.stormTried = false
+        UI.save()
+        el.mgrSeg.paint()
+        UI.paintFarm()
+        UI.toast(v == "None" and "DONE accounts are not reported to a manager" or ("DONE accounts → " .. v), "Good")
+    end, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0) }, 64)
+
+    local waitRow = UI.new("Frame", { BackgroundColor3 = TH.Panel, Size = UDim2.new(1, 0, 0, 52), LayoutOrder = 12, Parent = page },
+        { UI.corner(10), UI.stroke() })
+    UI.label("Trade countdown", 13, TH.Text, TH.Bold, { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -200, 0, 16), Parent = waitRow })
+    UI.label("seconds between the next account arriving in the server and the trade", 11, TH.Sub, TH.Font,
+        { Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -200, 0, 14), Parent = waitRow })
+    local function setWait(n)
+        n = math.clamp(math.floor(n), 0, 600)
+        CFG.Trade.WaitAfterJoin = n
+        G.tradeWait = n
+        UI.save()
+        UI.paintFarm()
+    end
+    UI.smallButton(waitRow, "+", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), TextSize = 15 }, function()
+        setWait(CFG.Trade.WaitAfterJoin + 5)
+    end)
+    el.waitBox = UI.new("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -44, 0.5, 0), Size = UDim2.fromOffset(80, 28),
+        BackgroundColor3 = TH.Bg, Text = "", TextSize = 13, Font = TH.Bold, TextColor3 = TH.Text, ClearTextOnFocus = true, Parent = waitRow },
+        { UI.corner(6) })
+    UI.smallButton(waitRow, "–", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -130, 0.5, 0), TextSize = 15 }, function()
+        setWait(CFG.Trade.WaitAfterJoin - 5)
+    end)
+    UI.track(el.waitBox.FocusLost:Connect(function()
+        local n = tonumber((string.gsub(el.waitBox.Text, "%D", "")))
+        if n then
+            setWait(n)
+        else
+            UI.paintFarm()
+        end
+    end))
+    el.tHop = UI.toggle(page, "Holder hops to an emptier server", function()
+        return CFG.Trade.HostHop
+    end, function(v)
+        CFG.Trade.HostHop = v
+        G.hostHop = v
+        UI.save()
+    end, 13, "when the maxed account's server is full, it moves so the next account can get in")
+    el.tLeave = UI.toggle(page, "Leave the game when DONE", function()
+        return CFG.Chain.LeaveWhenDone
+    end, function(v)
+        CFG.Chain.LeaveWhenDone = v
+        G.leaveDone = v
+        UI.save()
+    end, 14, "only used with manager None - with a manager, the manager closes the game")
     local actions = UI.new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), LayoutOrder = 9, Parent = page })
     UI.button(actions, "Sell overflow now", TH.Accent, { Size = UDim2.new(0.5, -4, 1, 0) }, function()
         SYS.sell(true)
@@ -4651,6 +4779,20 @@ function UI.paintFarm()
     el.freeInfo.Text = "now " .. free .. " / " .. cap .. " free" .. (rolls > CFG.Sell.FreeSlots and
         (" · never below " .. rolls .. " (dice rolled per click)") or "")
     el.freeInfo.TextColor3 = free < math.max(CFG.Sell.FreeSlots, rolls) and TH.Warn or TH.Sub
+    if el.mgrSeg then
+        el.mgrSeg.paint()
+        local kind = MGR.kind()
+        local want = string.lower(tostring(CFG.Manager or "Auto"))
+        el.mgrInfo.Text = want == "none" and "off - DONE accounts just stop (and leave if the switch below is on)"
+            or (kind and ("using " .. kind .. (want == "auto" and " (found automatically)" or "")))
+            or (want == "auto" and "Auto: no Masterp/Horst found on this screen yet (Storm must be picked)" or "not found on this screen yet")
+        el.mgrInfo.TextColor3 = (kind or want == "none") and TH.Sub or TH.Warn
+        if not el.waitBox:IsFocused() then
+            el.waitBox.Text = CFG.Trade.WaitAfterJoin .. " s"
+        end
+        el.tHop.paint()
+        el.tLeave.paint()
+    end
 end
 
 -- ── live updates ────────────────────────────────────────────
